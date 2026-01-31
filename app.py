@@ -676,6 +676,8 @@ st.markdown("""
 def init_session_state():
     """Initialize session state variables."""
     defaults = {
+        "authenticated": False,
+        "auth_failed": False,
         "results": None,
         "completed_results": None,
         "summary": None,
@@ -690,6 +692,162 @@ def init_session_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+# =============================================================================
+# Authentication
+# =============================================================================
+
+def get_app_passcode() -> Optional[str]:
+    """Get the app passcode from secrets or environment."""
+    try:
+        if "APP_PASSCODE" in st.secrets:
+            return st.secrets["APP_PASSCODE"]
+    except FileNotFoundError:
+        pass
+    return os.environ.get("APP_PASSCODE")
+
+
+def check_passcode(entered_passcode: str) -> bool:
+    """Check if the entered passcode is correct."""
+    correct_passcode = get_app_passcode()
+    if not correct_passcode:
+        # No passcode configured - allow access
+        return True
+    return entered_passcode == correct_passcode
+
+
+def render_login_screen():
+    """Render a beautiful neumorphic login screen."""
+    # Center the login form
+    st.markdown("""
+    <style>
+        /* Login page specific styles */
+        .login-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 70vh;
+            padding: 20px;
+        }
+
+        .login-card {
+            background: var(--nm-bg, #E4E8EC);
+            border-radius: 24px;
+            padding: 48px 40px;
+            box-shadow:
+                12px 12px 24px #A3B1C6,
+                -12px -12px 24px #FFFFFF;
+            text-align: center;
+            max-width: 400px;
+            width: 100%;
+        }
+
+        .login-logo {
+            font-size: 3.5rem;
+            margin-bottom: 8px;
+        }
+
+        .login-title {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #2D3748;
+            margin: 0 0 8px 0;
+        }
+
+        .login-subtitle {
+            font-size: 0.95rem;
+            color: #5A6778;
+            margin: 0 0 32px 0;
+        }
+
+        .login-error {
+            background: linear-gradient(135deg, #F0E4E4 0%, #E8DCDC 100%);
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin-bottom: 20px;
+            border-left: 4px solid #C9736D;
+        }
+
+        .login-error p {
+            color: #8B4C47;
+            margin: 0;
+            font-size: 0.9rem;
+        }
+
+        .login-footer {
+            margin-top: 24px;
+            font-size: 0.8rem;
+            color: #8896A4;
+        }
+
+        /* Style the input field */
+        .login-card .stTextInput > div > div > input {
+            text-align: center;
+            font-size: 1.2rem;
+            letter-spacing: 8px;
+            padding: 16px !important;
+        }
+
+        /* Style the button */
+        .login-card .stButton > button {
+            width: 100%;
+            padding: 12px 24px !important;
+            font-size: 1rem !important;
+            font-weight: 600 !important;
+            margin-top: 8px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Create centered layout
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col2:
+        st.markdown("""
+        <div class="login-container">
+            <div class="login-card">
+                <div class="login-logo">🔐</div>
+                <h1 class="login-title">Sprint Dashboard</h1>
+                <p class="login-subtitle">Enter passcode to continue</p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Show error message if authentication failed
+        if st.session_state.get("auth_failed"):
+            st.markdown("""
+            <div class="login-error">
+                <p>Incorrect passcode. Please try again.</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Passcode input
+        passcode = st.text_input(
+            "Passcode",
+            type="password",
+            placeholder="••••••",
+            label_visibility="collapsed",
+            key="passcode_input"
+        )
+
+        # Login button
+        if st.button("Unlock", type="primary", use_container_width=True):
+            if check_passcode(passcode):
+                st.session_state["authenticated"] = True
+                st.session_state["auth_failed"] = False
+                st.rerun()
+            else:
+                st.session_state["auth_failed"] = True
+                st.rerun()
+
+        # Footer
+        st.markdown("""
+        <div class="login-footer">
+            SourceHub Development Team
+        </div>
+        """, unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -2207,6 +2365,11 @@ def render_homepage():
 def main():
     """Main application."""
     init_session_state()
+
+    # Check if passcode is required and user is not authenticated
+    if get_app_passcode() and not st.session_state.get("authenticated", False):
+        render_login_screen()
+        return
 
     # Sidebar - always render for configuration
     config_options = render_sidebar()
