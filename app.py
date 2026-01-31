@@ -618,6 +618,53 @@ st.markdown("""
             animation: none !important;
         }
     }
+
+    /* =================================================================
+       SPRINT PROGRESS BAR - Neumorphic Style (Quick Wins)
+       ================================================================= */
+    .nm-progress-container {
+        background: var(--nm-bg);
+        border-radius: 20px;
+        padding: 24px;
+        margin-bottom: 1.5rem;
+        box-shadow: var(--nm-shadow-raised);
+    }
+
+    .nm-progress-bar-outer {
+        background: var(--nm-bg);
+        border-radius: 12px;
+        height: 24px;
+        box-shadow: var(--nm-shadow-inset);
+        overflow: hidden;
+        position: relative;
+    }
+
+    .nm-progress-bar-inner {
+        height: 100%;
+        border-radius: 12px;
+        background: linear-gradient(90deg, var(--nm-primary) 0%, var(--nm-success) 100%);
+        box-shadow: 0 2px 8px rgba(107, 127, 215, 0.4);
+        transition: width 0.6s ease;
+    }
+
+    .nm-progress-text {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-weight: 600;
+        font-size: 0.85rem;
+        color: var(--nm-text-primary);
+        text-shadow: 0 1px 2px rgba(255,255,255,0.8);
+    }
+
+    .nm-progress-stats {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 12px;
+        font-size: 0.9rem;
+        color: var(--nm-text-secondary);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1177,6 +1224,522 @@ def render_burndown_chart(
 
 
 # =============================================================================
+# Quick Wins - Sprint Progress Bar
+# =============================================================================
+
+def render_sprint_progress_bar(
+    results: list[TaskCompliance],
+    completed_results: Optional[list[TaskCompliance]] = None,
+    selected_sprint: Optional[str] = None
+):
+    """Render beautiful neumorphic sprint progress bar with accurate completion data."""
+    # Filter by sprint if selected
+    if selected_sprint:
+        sprint_tasks = [t for t in results if task_in_sprint(t, selected_sprint)]
+        completed_sprint_tasks = [t for t in (completed_results or []) if task_in_sprint(t, selected_sprint)]
+    else:
+        sprint_tasks = results
+        completed_sprint_tasks = completed_results or []
+
+    # Calculate total and completed points (same logic as burndown)
+    total_points = 0
+    completed_points = 0
+
+    # Active tasks
+    for task in sprint_tasks:
+        try:
+            points = float(task.story_points) if task.story_points else 0
+        except (ValueError, TypeError):
+            points = 0
+        total_points += points
+        # Count "Done" status tasks as completed
+        if task.progress == "Done":
+            completed_points += points
+
+    # Completed tasks from Asana (truly completed)
+    for task in completed_sprint_tasks:
+        try:
+            points = float(task.story_points) if task.story_points else 0
+        except (ValueError, TypeError):
+            points = 0
+        total_points += points
+        completed_points += points
+
+    pct = (completed_points / total_points * 100) if total_points > 0 else 0
+
+    st.markdown(f"""
+    <div class="nm-progress-container">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <h3 style="margin: 0; color: var(--nm-text-primary);">Sprint Progress</h3>
+            <span style="font-size: 1.5rem; font-weight: 700; color: var(--nm-primary);">{pct:.0f}%</span>
+        </div>
+        <div class="nm-progress-bar-outer">
+            <div class="nm-progress-bar-inner" style="width: {pct}%;"></div>
+            <div class="nm-progress-text">{completed_points:.0f} / {total_points:.0f} pts</div>
+        </div>
+        <div class="nm-progress-stats">
+            <span>Completed: {completed_points:.0f} pts</span>
+            <span>Remaining: {total_points - completed_points:.0f} pts</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# =============================================================================
+# Quick Wins - Overdue Tasks Alert
+# =============================================================================
+
+def render_overdue_alert_section(results: list[TaskCompliance]):
+    """Render red alert for overdue tasks."""
+    overdue_tasks = [t for t in results if getattr(t, 'is_overdue', False)]
+
+    if not overdue_tasks:
+        return
+
+    # Sort by most overdue first (most negative days_until_due)
+    overdue_tasks.sort(key=lambda t: getattr(t, 'days_until_due', 0) or 0)
+
+    total_overdue_points = sum(
+        float(t.story_points) if t.story_points else 0
+        for t in overdue_tasks
+    )
+
+    st.markdown(f"""
+    <div class="nm-alert nm-alert--error">
+        <h3>Overdue Tasks ({len(overdue_tasks)})</h3>
+        <p>{total_overdue_points:.0f} story points are past due date</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Create header row
+    header_cols = st.columns([3, 1.5, 1.5, 1, 1, 1])
+    headers = ["Task Name", "Assignee", "Due Date", "Days Overdue", "Points", "Actions"]
+    for i, header in enumerate(headers):
+        header_cols[i].markdown(f"**{header}**")
+
+    # Create data rows (sorted by most overdue first)
+    for idx, task in enumerate(overdue_tasks):
+        row_cols = st.columns([3, 1.5, 1.5, 1, 1, 1])
+
+        # Task name (truncated)
+        task_name = task.name[:35] + "..." if len(task.name) > 35 else task.name
+        row_cols[0].write(task_name)
+
+        # Assignee
+        row_cols[1].write(task.assignee or "Unassigned")
+
+        # Due Date
+        row_cols[2].write(task.due_on or "-")
+
+        # Days Overdue
+        days_until = getattr(task, 'days_until_due', None)
+        days_overdue = abs(days_until) if days_until is not None and days_until < 0 else 0
+        row_cols[3].write(f"{days_overdue}d")
+
+        # Points
+        row_cols[4].write(task.story_points or "-")
+
+        # Action buttons
+        btn_col1, btn_col2 = row_cols[5].columns(2)
+        if btn_col1.button("view", key=f"overdue_view_{idx}", help="View in app"):
+            st.session_state["selected_task_gid"] = task.gid
+            st.session_state["selected_task_url"] = task.url
+            st.session_state["selected_task_name"] = task.name
+            st.rerun()
+        btn_col2.link_button("link", task.url, help="Open in Asana")
+
+    st.markdown("---")
+
+
+# =============================================================================
+# Quick Wins - Due This Week Alert
+# =============================================================================
+
+def render_due_this_week_section(results: list[TaskCompliance]):
+    """Render amber alert for tasks due within 7 days."""
+    due_soon = [
+        t for t in results
+        if getattr(t, 'days_until_due', None) is not None
+        and 0 <= t.days_until_due <= 7
+        and t.progress != "Done"
+    ]
+
+    if not due_soon:
+        return
+
+    # Sort by due date ascending (soonest first)
+    due_soon.sort(key=lambda t: getattr(t, 'days_until_due', 999) or 999)
+
+    total_due_points = sum(
+        float(t.story_points) if t.story_points else 0
+        for t in due_soon
+    )
+
+    st.markdown(f"""
+    <div class="nm-alert nm-alert--warning">
+        <h3>Due This Week ({len(due_soon)})</h3>
+        <p>{total_due_points:.0f} story points due in the next 7 days</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Create header row
+    header_cols = st.columns([3, 1.5, 1.5, 1, 1, 1])
+    headers = ["Task Name", "Assignee", "Due Date", "Days Left", "Points", "Actions"]
+    for i, header in enumerate(headers):
+        header_cols[i].markdown(f"**{header}**")
+
+    # Create data rows
+    for idx, task in enumerate(due_soon):
+        row_cols = st.columns([3, 1.5, 1.5, 1, 1, 1])
+
+        # Task name (truncated)
+        task_name = task.name[:35] + "..." if len(task.name) > 35 else task.name
+        row_cols[0].write(task_name)
+
+        # Assignee
+        row_cols[1].write(task.assignee or "Unassigned")
+
+        # Due Date
+        row_cols[2].write(task.due_on or "-")
+
+        # Days Left
+        days_left = getattr(task, 'days_until_due', None)
+        if days_left == 0:
+            row_cols[3].write("Today")
+        elif days_left == 1:
+            row_cols[3].write("Tomorrow")
+        else:
+            row_cols[3].write(f"{days_left}d")
+
+        # Points
+        row_cols[4].write(task.story_points or "-")
+
+        # Action buttons
+        btn_col1, btn_col2 = row_cols[5].columns(2)
+        if btn_col1.button("view", key=f"due_soon_view_{idx}", help="View in app"):
+            st.session_state["selected_task_gid"] = task.gid
+            st.session_state["selected_task_url"] = task.url
+            st.session_state["selected_task_name"] = task.name
+            st.rerun()
+        btn_col2.link_button("link", task.url, help="Open in Asana")
+
+    st.markdown("---")
+
+
+# =============================================================================
+# Quick Wins - Points by Assignee Chart (Stacked Bar with Invalid Detection)
+# =============================================================================
+
+# Valid Fibonacci story points
+VALID_FIBONACCI_POINTS = (0, 1, 2, 3, 5, 8, 13)
+# Types that should NOT have story points
+TYPES_WITHOUT_POINTS = ("Epic", "Bug")
+
+
+def is_invalid_story_points(task: TaskCompliance) -> bool:
+    """Check if a task has invalid story points (Bug/Epic with points or non-Fibonacci)."""
+    if not task.story_points:
+        return False
+
+    try:
+        points = float(task.story_points)
+    except (ValueError, TypeError):
+        return True  # Non-numeric is invalid
+
+    # Bug or Epic with story points
+    if task.task_type in TYPES_WITHOUT_POINTS and points > 0:
+        return True
+
+    # Non-Fibonacci number
+    if points != int(points) or int(points) not in VALID_FIBONACCI_POINTS:
+        return True
+
+    return False
+
+
+def render_points_by_assignee_chart(
+    results: list[TaskCompliance],
+    completed_results: Optional[list[TaskCompliance]] = None,
+    selected_sprint: Optional[str] = None
+):
+    """Render stacked horizontal bar chart showing completed vs remaining vs invalid points per assignee."""
+    if not PLOTLY_AVAILABLE:
+        st.warning("Plotly is required for charts. Install with: pip install plotly")
+        return
+
+    # Filter by sprint if selected
+    if selected_sprint:
+        sprint_tasks = [t for t in results if task_in_sprint(t, selected_sprint)]
+        completed_sprint_tasks = [t for t in (completed_results or []) if task_in_sprint(t, selected_sprint)]
+    else:
+        sprint_tasks = results
+        completed_sprint_tasks = completed_results or []
+
+    # Calculate points per assignee (completed vs remaining vs invalid)
+    assignee_completed = {}
+    assignee_remaining = {}
+    assignee_invalid = {}
+
+    def process_task(task, is_completed_task=False):
+        """Process a single task and categorize its points."""
+        try:
+            points = float(task.story_points) if task.story_points else 0
+        except (ValueError, TypeError):
+            points = 0
+
+        if points == 0:
+            return
+
+        assignee = task.assignee or "Unassigned"
+
+        # Initialize assignee if not seen
+        if assignee not in assignee_completed:
+            assignee_completed[assignee] = 0
+            assignee_remaining[assignee] = 0
+            assignee_invalid[assignee] = 0
+
+        # Check if invalid (Bug/Epic with points OR non-Fibonacci)
+        if is_invalid_story_points(task):
+            assignee_invalid[assignee] += points
+        elif is_completed_task or task.progress == "Done":
+            assignee_completed[assignee] += points
+        else:
+            assignee_remaining[assignee] += points
+
+    # Process active tasks
+    for task in sprint_tasks:
+        process_task(task, is_completed_task=False)
+
+    # Process completed tasks from Asana
+    for task in completed_sprint_tasks:
+        process_task(task, is_completed_task=True)
+
+    # Get all assignees and sort by total points
+    all_assignees = set(assignee_completed.keys()) | set(assignee_remaining.keys()) | set(assignee_invalid.keys())
+    if not all_assignees:
+        st.info("No story points data for assignees")
+        return
+
+    assignee_totals = {
+        a: assignee_completed.get(a, 0) + assignee_remaining.get(a, 0) + assignee_invalid.get(a, 0)
+        for a in all_assignees
+    }
+    sorted_assignees = sorted(all_assignees, key=lambda a: assignee_totals[a], reverse=True)
+
+    # Prepare data for chart
+    completed_values = [assignee_completed.get(a, 0) for a in sorted_assignees]
+    remaining_values = [assignee_remaining.get(a, 0) for a in sorted_assignees]
+    invalid_values = [assignee_invalid.get(a, 0) for a in sorted_assignees]
+
+    # Neumorphic colors
+    nm_success = '#5B9A8B'  # Completed - green
+    nm_primary = '#6B7FD7'  # Remaining - blue
+    nm_error = '#C9736D'    # Invalid - red
+
+    fig = go.Figure()
+
+    # Completed bar
+    fig.add_trace(go.Bar(
+        y=sorted_assignees,
+        x=completed_values,
+        name='Completed',
+        orientation='h',
+        marker=dict(color=nm_success),
+        text=[f'{v:.0f}' if v > 0 else '' for v in completed_values],
+        textposition='inside',
+        hovertemplate='%{y}<br>Completed: %{x:.0f} pts<extra></extra>'
+    ))
+
+    # Remaining bar
+    fig.add_trace(go.Bar(
+        y=sorted_assignees,
+        x=remaining_values,
+        name='Remaining',
+        orientation='h',
+        marker=dict(color=nm_primary),
+        text=[f'{v:.0f}' if v > 0 else '' for v in remaining_values],
+        textposition='inside',
+        hovertemplate='%{y}<br>Remaining: %{x:.0f} pts<extra></extra>'
+    ))
+
+    # Invalid bar (Bug/Epic with points or non-Fibonacci)
+    total_invalid = sum(invalid_values)
+    if total_invalid > 0:
+        fig.add_trace(go.Bar(
+            y=sorted_assignees,
+            x=invalid_values,
+            name='Invalid',
+            orientation='h',
+            marker=dict(color=nm_error, pattern=dict(shape="x", size=6)),
+            text=[f'{v:.0f}' if v > 0 else '' for v in invalid_values],
+            textposition='inside',
+            hovertemplate='%{y}<br>Invalid: %{x:.0f} pts<br>(Bug/Epic or non-Fibonacci)<extra></extra>'
+        ))
+
+    # Calculate totals for title
+    total_completed = sum(completed_values)
+    total_remaining = sum(remaining_values)
+    total_all = total_completed + total_remaining + total_invalid
+
+    title_text = f"Workload by Assignee ({total_completed:.0f}/{total_all:.0f} pts done)"
+    if total_invalid > 0:
+        title_text += f" | {total_invalid:.0f} invalid"
+
+    fig.update_layout(
+        title=dict(
+            text=title_text,
+            font=dict(size=16, color='#2D3748')
+        ),
+        barmode='stack',
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=max(300, len(sorted_assignees) * 40 + 100),
+        paper_bgcolor='#E4E8EC',
+        plot_bgcolor='#E4E8EC',
+        margin=dict(t=60, b=40, l=120, r=20),
+        xaxis=dict(
+            title="Story Points",
+            gridcolor='rgba(163, 177, 198, 0.3)',
+        ),
+        yaxis=dict(
+            title="",
+            autorange="reversed",  # Highest at top
+        ),
+    )
+
+    st.plotly_chart(fig, use_container_width=True, key="points_by_assignee")
+
+    # Show warning if there are invalid points
+    if total_invalid > 0:
+        st.warning(f"**{total_invalid:.0f} invalid story points detected** - Bug/Epic with points or non-Fibonacci values")
+
+
+# =============================================================================
+# Quick Wins - Invalid Story Points Section
+# =============================================================================
+
+def get_invalid_reason(task: TaskCompliance) -> Optional[str]:
+    """Get the reason why a task has invalid story points."""
+    if not task.story_points:
+        return None
+
+    try:
+        points = float(task.story_points)
+    except (ValueError, TypeError):
+        return "Non-numeric value"
+
+    # Bug or Epic with story points
+    if task.task_type in TYPES_WITHOUT_POINTS and points > 0:
+        return f"{task.task_type} should not have points"
+
+    # Non-Fibonacci number
+    if points != int(points) or int(points) not in VALID_FIBONACCI_POINTS:
+        return f"Non-Fibonacci value ({task.story_points})"
+
+    return None
+
+
+def render_invalid_story_points_section(
+    results: list[TaskCompliance],
+    completed_results: Optional[list[TaskCompliance]] = None,
+    selected_sprint: Optional[str] = None
+):
+    """Render section showing all tasks with invalid story points (including completed)."""
+    # Filter by sprint if selected
+    if selected_sprint:
+        sprint_tasks = [t for t in results if task_in_sprint(t, selected_sprint)]
+        completed_sprint_tasks = [t for t in (completed_results or []) if task_in_sprint(t, selected_sprint)]
+    else:
+        sprint_tasks = results
+        completed_sprint_tasks = completed_results or []
+
+    # Combine all tasks and find invalid ones
+    all_tasks = sprint_tasks + completed_sprint_tasks
+    invalid_tasks = []
+
+    for task in all_tasks:
+        reason = get_invalid_reason(task)
+        if reason:
+            invalid_tasks.append((task, reason))
+
+    if not invalid_tasks:
+        return
+
+    # Sort by assignee, then by points descending
+    invalid_tasks.sort(key=lambda x: (x[0].assignee or "ZZZ", -(float(x[0].story_points or 0))))
+
+    # Calculate total invalid points
+    total_invalid_points = sum(
+        float(t.story_points) if t.story_points else 0
+        for t, _ in invalid_tasks
+    )
+
+    # Group by reason type for summary
+    bugs_with_points = sum(1 for _, r in invalid_tasks if "Bug" in r)
+    epics_with_points = sum(1 for _, r in invalid_tasks if "Epic" in r)
+    non_fibonacci = sum(1 for _, r in invalid_tasks if "Fibonacci" in r)
+
+    # Build summary text
+    summary_parts = []
+    if bugs_with_points:
+        summary_parts.append(f"{bugs_with_points} Bugs with points")
+    if epics_with_points:
+        summary_parts.append(f"{epics_with_points} Epics with points")
+    if non_fibonacci:
+        summary_parts.append(f"{non_fibonacci} non-Fibonacci values")
+
+    st.markdown(f"""
+    <div class="nm-alert nm-alert--error">
+        <h3>Invalid Story Points ({len(invalid_tasks)} tasks)</h3>
+        <p>{total_invalid_points:.0f} points are invalid: {', '.join(summary_parts)}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Create header row
+    header_cols = st.columns([2.5, 1.2, 0.8, 0.8, 2, 0.8, 0.8])
+    headers = ["Task Name", "Assignee", "Type", "Points", "Issue", "Status", "Actions"]
+    for i, header in enumerate(headers):
+        header_cols[i].markdown(f"**{header}**")
+
+    # Create data rows
+    for idx, (task, reason) in enumerate(invalid_tasks):
+        row_cols = st.columns([2.5, 1.2, 0.8, 0.8, 2, 0.8, 0.8])
+
+        # Task name (truncated)
+        task_name = task.name[:30] + "..." if len(task.name) > 30 else task.name
+        row_cols[0].write(task_name)
+
+        # Assignee
+        row_cols[1].write(task.assignee or "Unassigned")
+
+        # Type
+        row_cols[2].write(task.task_type or "-")
+
+        # Points
+        row_cols[3].write(task.story_points or "-")
+
+        # Issue reason (highlighted)
+        row_cols[4].markdown(f"**:red[{reason}]**")
+
+        # Status (show if completed)
+        status = task.progress or "Done"
+        if task in [t for t, _ in invalid_tasks if t in (completed_sprint_tasks if selected_sprint else (completed_results or []))]:
+            status = "Completed"
+        row_cols[5].write(status)
+
+        # Action buttons
+        btn_col1, btn_col2 = row_cols[6].columns(2)
+        if btn_col1.button("view", key=f"invalid_view_{idx}", help="View in app"):
+            st.session_state["selected_task_gid"] = task.gid
+            st.session_state["selected_task_url"] = task.url
+            st.session_state["selected_task_name"] = task.name
+            st.rerun()
+        btn_col2.link_button("link", task.url, help="Open in Asana")
+
+    st.markdown("---")
+
+
+# =============================================================================
 # Alert Sections
 # =============================================================================
 
@@ -1531,7 +2094,12 @@ def render_compliance_details(results: list[TaskCompliance]):
 # Download Buttons
 # =============================================================================
 
-def render_download_buttons(results: list[TaskCompliance], summary: ReportSummary, config: Config):
+def render_download_buttons(
+    results: list[TaskCompliance],
+    summary: ReportSummary,
+    config: Config,
+    completed_results: Optional[list[TaskCompliance]] = None
+):
     """Render download buttons."""
     st.subheader("Download Report")
 
@@ -1561,7 +2129,11 @@ def render_download_buttons(results: list[TaskCompliance], summary: ReportSummar
         if OPENPYXL_AVAILABLE:
             from asana_daily_report import ExcelReportGenerator
             excel_generator = ExcelReportGenerator(config)
-            workbook = excel_generator.generate(results, summary)
+            # Use generate_with_completed to include invalid points analysis
+            if completed_results:
+                workbook = excel_generator.generate_with_completed(results, completed_results, summary)
+            else:
+                workbook = excel_generator.generate(results, summary)
             buffer = io.BytesIO()
             workbook.save(buffer)
             buffer.seek(0)
@@ -1810,10 +2382,30 @@ def main():
 
     st.markdown("---")
 
-    # Burndown chart
-    render_burndown_chart(filtered_results, completed_results, filters.get("sprint"))
+    # Sprint Progress Bar (Quick Wins)
+    render_sprint_progress_bar(filtered_results, completed_results, filters.get("sprint"))
+
+    # Charts row: Burndown and Points by Assignee side by side
+    col_burndown, col_assignee = st.columns([3, 2])
+
+    with col_burndown:
+        # Burndown chart
+        render_burndown_chart(filtered_results, completed_results, filters.get("sprint"))
+
+    with col_assignee:
+        # Points by Assignee Chart (Quick Wins)
+        render_points_by_assignee_chart(filtered_results, completed_results, filters.get("sprint"))
 
     st.markdown("---")
+
+    # Invalid Story Points Alert (Quick Wins) - Shows both active and completed tasks
+    render_invalid_story_points_section(filtered_results, completed_results, filters.get("sprint"))
+
+    # Overdue Tasks Alert (Quick Wins) - Most critical first
+    render_overdue_alert_section(filtered_results)
+
+    # Due This Week Alert (Quick Wins)
+    render_due_this_week_section(filtered_results)
 
     # Alert sections (red first - more critical, then amber)
     render_red_alert_section(filtered_results)
@@ -1834,7 +2426,7 @@ def main():
     st.markdown("---")
 
     # Download buttons
-    render_download_buttons(filtered_results, filtered_summary, config)
+    render_download_buttons(filtered_results, filtered_summary, config, completed_results)
 
 
 if __name__ == "__main__":

@@ -186,6 +186,11 @@ class TaskCompliance:
     # Rule violations
     rule_violations: list[str] = field(default_factory=list)
 
+    # Quick Wins - Computed fields for overdue/due soon tracking
+    is_overdue: bool = False
+    days_until_due: Optional[int] = None  # Negative if overdue
+    task_age_days: int = 0  # Days since created
+
     @property
     def mandatory_missing(self) -> list[str]:
         """List of missing or invalid mandatory attributes."""
@@ -290,6 +295,12 @@ class ReportSummary:
     # Report metadata
     report_date: str = ""      # Date of the report (YYYY-MM-DD)
     generated_at: str = ""     # Full timestamp when report was generated
+
+    # Quick Wins metrics
+    overdue_tasks: int = 0
+    due_this_week: int = 0
+    overdue_points: float = 0
+    due_this_week_points: float = 0
 
 
 # =============================================================================
@@ -463,6 +474,26 @@ class ComplianceAnalyzer:
             severity=severity,
             description_length=len(notes),
         )
+
+        # Calculate overdue and due soon (Quick Wins)
+        from datetime import date
+        today = date.today()
+
+        if due_on:
+            try:
+                due_date = datetime.strptime(due_on, '%Y-%m-%d').date()
+                compliance.days_until_due = (due_date - today).days
+                compliance.is_overdue = compliance.days_until_due < 0 and progress != "Done"
+            except (ValueError, TypeError):
+                pass
+
+        # Calculate task age (days since created)
+        if created_at:
+            try:
+                created = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                compliance.task_age_days = (datetime.now(timezone.utc) - created).days
+            except (ValueError, TypeError):
+                pass
 
         # Check mandatory attributes
         compliance.missing_epic = not epic or epic.strip() == ''
@@ -809,6 +840,25 @@ class ComplianceAnalyzer:
             # Count compliant
             if task.is_compliant:
                 summary.compliant_tasks += 1
+
+            # Quick Wins: Count overdue and due this week
+            if task.is_overdue:
+                summary.overdue_tasks += 1
+                try:
+                    points = float(task.story_points) if task.story_points else 0
+                    summary.overdue_points += points
+                except (ValueError, TypeError):
+                    pass
+
+            if (task.days_until_due is not None
+                and 0 <= task.days_until_due <= 7
+                and task.progress != "Done"):
+                summary.due_this_week += 1
+                try:
+                    points = float(task.story_points) if task.story_points else 0
+                    summary.due_this_week_points += points
+                except (ValueError, TypeError):
+                    pass
 
             # By assignee
             by_assignee[task.assignee]["total"] += 1
@@ -1401,6 +1451,11 @@ class ExcelReportGenerator:
             'Missing Fields': ', '.join(task.mandatory_missing) if task.mandatory_missing else 'None',
             'Rule Violations': ', '.join(task.rule_violations) if task.rule_violations else 'None',
             'Link': task.url,
+            # Quick Wins columns
+            'Days Until Due': task.days_until_due if task.days_until_due is not None else 'No date',
+            'Task Age (Days)': task.task_age_days,
+            'Overdue': 'Yes' if task.is_overdue else 'No',
+            'Days Overdue': abs(task.days_until_due) if task.is_overdue and task.days_until_due is not None else 'N/A',
         }
 
         for col_idx, col_name in enumerate(columns, 1):
@@ -1430,6 +1485,19 @@ class ExcelReportGenerator:
                     cell.fill = self.todo_fill
                 elif task.needs_daily_update:
                     cell.fill = self.active_fill
+
+            # Color coding for overdue/due soon (Quick Wins)
+            if col_name == 'Overdue' and task.is_overdue:
+                cell.fill = self.danger_fill
+
+            if col_name == 'Days Until Due' and task.days_until_due is not None:
+                if task.days_until_due < 0:
+                    cell.fill = self.danger_fill
+                elif task.days_until_due <= 3:
+                    cell.fill = self.warning_fill
+
+            if col_name == 'Days Overdue' and task.is_overdue:
+                cell.fill = self.danger_fill
 
     def generate(self, results: list[TaskCompliance], summary: ReportSummary) -> Workbook:
         """Generate Excel workbook with multiple sheets."""
@@ -1534,7 +1602,8 @@ class ExcelReportGenerator:
         # ===== Sheet 2: All Tasks =====
         ws_all = wb.create_sheet("All Tasks")
         all_columns = ['Task Name', 'Assignee', 'Status', 'Sprint', 'Epic', 'Type',
-                       'Story Points', 'Severity', 'Due Date', 'Created',
+                       'Story Points', 'Severity', 'Due Date', 'Days Until Due',
+                       'Overdue', 'Task Age (Days)', 'Created',
                        'Description Chars', 'Last Comment By', 'Total Comments',
                        'Hours Since Update', 'Compliance Score', 'Missing Fields',
                        'Rule Violations', 'Link']
@@ -1714,6 +1783,177 @@ class ExcelReportGenerator:
 
         self._auto_adjust_columns(ws_violations)
         ws_violations.freeze_panes = 'A2'
+
+        # ===== Sheet 13: Overdue Tasks (Quick Wins) =====
+        overdue_tasks = [t for t in results if t.is_overdue]
+        # Sort by most overdue first (most negative days_until_due)
+        overdue_tasks.sort(key=lambda t: t.days_until_due if t.days_until_due is not None else 0)
+        ws_overdue = wb.create_sheet("Overdue Tasks")
+        overdue_columns = ['Task Name', 'Assignee', 'Due Date', 'Days Overdue',
+                          'Story Points', 'Progress', 'Sprint', 'Link']
+
+        for col, header in enumerate(overdue_columns, 1):
+            ws_overdue.cell(row=1, column=col, value=header)
+        self._style_header_row(ws_overdue, 1, len(overdue_columns))
+
+        for row_idx, task in enumerate(overdue_tasks, 2):
+            self._add_task_row(ws_overdue, row_idx, task, overdue_columns)
+
+        self._auto_adjust_columns(ws_overdue)
+        ws_overdue.freeze_panes = 'A2'
+
+        # ===== Sheet 14: Due This Week (Quick Wins) =====
+        due_soon_tasks = [
+            t for t in results
+            if t.days_until_due is not None
+            and 0 <= t.days_until_due <= 7
+            and t.progress != "Done"
+        ]
+        # Sort by due date (soonest first)
+        due_soon_tasks.sort(key=lambda t: t.days_until_due if t.days_until_due is not None else 999)
+        ws_due_soon = wb.create_sheet("Due This Week")
+        due_soon_columns = ['Task Name', 'Assignee', 'Due Date', 'Days Until Due',
+                           'Story Points', 'Progress', 'Sprint', 'Link']
+
+        for col, header in enumerate(due_soon_columns, 1):
+            ws_due_soon.cell(row=1, column=col, value=header)
+        self._style_header_row(ws_due_soon, 1, len(due_soon_columns))
+
+        for row_idx, task in enumerate(due_soon_tasks, 2):
+            self._add_task_row(ws_due_soon, row_idx, task, due_soon_columns)
+
+        self._auto_adjust_columns(ws_due_soon)
+        ws_due_soon.freeze_panes = 'A2'
+
+        return wb
+
+    def _is_invalid_story_points(self, task: TaskCompliance) -> tuple[bool, str]:
+        """Check if a task has invalid story points and return reason.
+
+        Returns:
+            tuple of (is_invalid, reason)
+        """
+        if not task.story_points:
+            return False, ""
+
+        try:
+            points = float(task.story_points)
+        except (ValueError, TypeError):
+            return True, "Non-numeric value"
+
+        # Bug or Epic with story points
+        if task.task_type in self.config.types_without_points and points > 0:
+            return True, f"{task.task_type} should not have points"
+
+        # Non-Fibonacci number
+        if points != int(points) or int(points) not in self.config.valid_story_points:
+            return True, f"Non-Fibonacci ({task.story_points})"
+
+        return False, ""
+
+    def generate_with_completed(
+        self,
+        results: list[TaskCompliance],
+        completed_results: list[TaskCompliance],
+        summary: ReportSummary
+    ) -> 'Workbook':
+        """Generate Excel workbook including completed tasks for invalid points analysis."""
+        # First generate the standard report
+        wb = self.generate(results, summary)
+
+        # Now add sheet for ALL invalid story points (including completed tasks)
+        all_tasks = results + completed_results
+
+        invalid_tasks = []
+        for task in all_tasks:
+            is_invalid, reason = self._is_invalid_story_points(task)
+            if is_invalid:
+                invalid_tasks.append((task, reason))
+
+        # Sort by assignee then by points
+        invalid_tasks.sort(key=lambda x: (x[0].assignee or "ZZZ", -(float(x[0].story_points or 0))))
+
+        ws_invalid = wb.create_sheet("Invalid Story Points")
+        invalid_columns = ['Task Name', 'Assignee', 'Type', 'Story Points', 'Issue',
+                          'Progress', 'Sprint', 'Link']
+
+        for col, header in enumerate(invalid_columns, 1):
+            ws_invalid.cell(row=1, column=col, value=header)
+        self._style_header_row(ws_invalid, 1, len(invalid_columns))
+
+        for row_idx, (task, reason) in enumerate(invalid_tasks, 2):
+            # Custom row handling to include the reason
+            col_data = {
+                'Task Name': task.name[:60] if len(task.name) > 60 else task.name,
+                'Assignee': task.assignee or 'Unassigned',
+                'Type': task.task_type or 'None',
+                'Story Points': task.story_points or 'None',
+                'Issue': reason,
+                'Progress': task.progress or 'None',
+                'Sprint': task.sprint or 'None',
+                'Link': task.url,
+            }
+
+            for col_idx, col_name in enumerate(invalid_columns, 1):
+                cell = ws_invalid.cell(row=row_idx, column=col_idx, value=col_data.get(col_name, ''))
+                cell.border = self.thin_border
+                cell.alignment = Alignment(vertical='center', wrap_text=True)
+
+                # Highlight the issue column in red
+                if col_name == 'Issue':
+                    cell.fill = self.danger_fill
+
+                # Add hyperlink for Link column
+                if col_name == 'Link':
+                    cell.hyperlink = task.url
+                    cell.font = self.link_font
+                    cell.value = "Open Task"
+
+        self._auto_adjust_columns(ws_invalid)
+        ws_invalid.freeze_panes = 'A2'
+
+        # Add summary row at the top
+        if invalid_tasks:
+            # Calculate totals by assignee
+            assignee_invalid_points = {}
+            for task, _ in invalid_tasks:
+                assignee = task.assignee or "Unassigned"
+                try:
+                    points = float(task.story_points) if task.story_points else 0
+                except (ValueError, TypeError):
+                    points = 0
+                assignee_invalid_points[assignee] = assignee_invalid_points.get(assignee, 0) + points
+
+            # Add a summary sheet for invalid points by assignee
+            ws_invalid_summary = wb.create_sheet("Invalid Points Summary")
+            summary_columns = ['Assignee', 'Invalid Points', 'Task Count']
+
+            for col, header in enumerate(summary_columns, 1):
+                ws_invalid_summary.cell(row=1, column=col, value=header)
+            self._style_header_row(ws_invalid_summary, 1, len(summary_columns))
+
+            # Count tasks per assignee
+            assignee_task_count = {}
+            for task, _ in invalid_tasks:
+                assignee = task.assignee or "Unassigned"
+                assignee_task_count[assignee] = assignee_task_count.get(assignee, 0) + 1
+
+            row_idx = 2
+            for assignee in sorted(assignee_invalid_points.keys(), key=lambda a: -assignee_invalid_points[a]):
+                ws_invalid_summary.cell(row=row_idx, column=1, value=assignee)
+                cell_points = ws_invalid_summary.cell(row=row_idx, column=2, value=assignee_invalid_points[assignee])
+                cell_points.fill = self.danger_fill
+                ws_invalid_summary.cell(row=row_idx, column=3, value=assignee_task_count[assignee])
+                row_idx += 1
+
+            # Add total row
+            total_invalid_points = sum(assignee_invalid_points.values())
+            total_invalid_tasks = len(invalid_tasks)
+            ws_invalid_summary.cell(row=row_idx, column=1, value="TOTAL").font = Font(bold=True)
+            ws_invalid_summary.cell(row=row_idx, column=2, value=total_invalid_points).font = Font(bold=True)
+            ws_invalid_summary.cell(row=row_idx, column=3, value=total_invalid_tasks).font = Font(bold=True)
+
+            self._auto_adjust_columns(ws_invalid_summary)
 
         return wb
 
