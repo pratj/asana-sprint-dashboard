@@ -1003,23 +1003,6 @@ def render_burndown_chart(
         st.info("No story points found for this sprint")
         return
 
-    # Debug info - show what data we have
-    with st.expander("Debug: Burndown Data", expanded=True):
-        st.write(f"**Sprint filter:** {sprint}")
-        st.write(f"**Incomplete tasks in sprint:** {len(sprint_tasks)}")
-        st.write(f"**Completed tasks from API:** {len(completed_sprint_tasks)}")
-        st.write(f"**Active (not Done):** {len(active_tasks)}")
-        st.write(f"**Done status tasks:** {len(done_tasks)}")
-        st.write(f"**Total points:** {total_points}")
-        st.write(f"**Completed points:** {completed_points}")
-        st.write(f"**Completion dates:** {dict(sorted(completion_dates.items()))}")
-
-        # Show sample of completed tasks
-        if completed_sprint_tasks:
-            st.write("**Sample completed tasks:**")
-            for t in completed_sprint_tasks[:5]:
-                st.write(f"- {t.name[:40]}... | Sprint: {t.sprint} | Points: {t.story_points} | completed_at: {t.completed_at}")
-
     # Get date range from all tasks
     all_dates = []
     for t in sprint_tasks + completed_sprint_tasks:
