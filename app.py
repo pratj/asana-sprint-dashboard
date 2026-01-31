@@ -929,26 +929,35 @@ def render_sidebar():
     }
 
 
-def render_dashboard_filters(results: list[TaskCompliance], analyzer) -> dict:
+def render_dashboard_filters(
+    results: list[TaskCompliance],
+    completed_results: Optional[list[TaskCompliance]],
+    analyzer
+) -> dict:
     """Render filter controls on the dashboard (horizontal layout)."""
     st.subheader("Filters")
 
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
 
     with col1:
-        # Sprint filter
-        sprints = analyzer.get_unique_sprints(results)
+        # Sprint filter - combine active and completed tasks to get all sprints with data
+        all_tasks_for_sprints = results + (completed_results or [])
+        sprints = analyzer.get_unique_sprints(all_tasks_for_sprints)
+
+        # Default to the last sprint (most recent) if available
+        default_index = len(sprints) if sprints else 0
+
         selected_sprint = st.selectbox(
             "Sprint",
             ["All"] + sprints,
-            index=len(sprints) if sprints else 0,
-            help="Filter by sprint",
+            index=default_index,
+            help="Filter by sprint (showing only sprints with data)",
             key="filter_sprint"
         )
 
     with col2:
-        # Assignee filter
-        assignees = analyzer.get_unique_assignees(results)
+        # Assignee filter - also from all tasks
+        assignees = analyzer.get_unique_assignees(all_tasks_for_sprints)
         selected_assignees = st.multiselect(
             "Assignees",
             assignees,
@@ -2527,7 +2536,7 @@ def main():
         st.session_state["selected_task_name"] = None
 
     # Dashboard filters (horizontal layout)
-    filters = render_dashboard_filters(results, reporter.analyzer)
+    filters = render_dashboard_filters(results, completed_results, reporter.analyzer)
 
     # Apply filters
     filtered_results = reporter.analyzer.filter_results(
