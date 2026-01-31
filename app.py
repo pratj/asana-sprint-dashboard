@@ -700,28 +700,37 @@ def render_sidebar():
     """Render sidebar with configuration."""
     st.sidebar.title("Configuration")
 
-    # Token input
-    st.sidebar.subheader("Authentication")
-
+    # Check for token in secrets or environment (secure sources)
     default_token = ""
+    token_is_secure = False
     try:
         if "ASANA_ACCESS_TOKEN" in st.secrets:
             default_token = st.secrets["ASANA_ACCESS_TOKEN"]
+            token_is_secure = True
     except FileNotFoundError:
         pass
 
     if not default_token and os.environ.get("ASANA_ACCESS_TOKEN"):
         default_token = os.environ.get("ASANA_ACCESS_TOKEN", "")
+        token_is_secure = True
 
-    if default_token:
-        st.sidebar.info("Token auto-loaded")
-
-    token = st.sidebar.text_input(
-        "Asana Access Token",
-        value=default_token,
-        type="password",
-        help="Your Asana Personal Access Token"
-    )
+    # Only show token input if NOT securely configured
+    if token_is_secure:
+        # Token is securely configured via secrets/env - hide input
+        token = default_token
+    else:
+        # No secure token - show input for local development only
+        st.sidebar.subheader("Authentication")
+        token = st.sidebar.text_input(
+            "Asana Access Token",
+            value="",
+            type="password",
+            help="Your Asana Personal Access Token"
+        )
+        st.sidebar.caption(
+            "[Get token from Asana](https://app.asana.com/0/developer-console)"
+        )
+        st.sidebar.markdown("---")
 
     st.sidebar.subheader("Options")
 
@@ -751,11 +760,6 @@ def render_sidebar():
         max_value=72,
         value=24,
         step=6,
-    )
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        "[Get Asana Token](https://app.asana.com/0/developer-console)"
     )
 
     return {
