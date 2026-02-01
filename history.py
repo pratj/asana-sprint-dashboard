@@ -448,8 +448,11 @@ def create_snapshot_from_results(
     if date is None:
         date = datetime.now().strftime("%Y-%m-%d")
 
-    # Filter results for this sprint
-    sprint_tasks = [t for t in results if t.sprint == sprint]
+    # Filter results for this sprint (handles comma-separated multi-enum values)
+    sprint_tasks = [
+        t for t in results
+        if t.sprint and sprint in [s.strip() for s in t.sprint.split(",")]
+    ]
 
     # Calculate points
     total_points = 0
