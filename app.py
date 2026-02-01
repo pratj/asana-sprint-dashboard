@@ -1816,16 +1816,25 @@ def get_invalid_reason(task: TaskCompliance) -> Optional[str]:
 def render_invalid_story_points_section(
     results: list[TaskCompliance],
     completed_results: Optional[list[TaskCompliance]] = None,
-    selected_sprint: Optional[str] = None
+    filters: Optional[dict] = None
 ):
     """Render section showing all tasks with invalid story points (including completed)."""
-    # Filter by sprint if selected
-    if selected_sprint:
-        sprint_tasks = [t for t in results if task_in_sprint(t, selected_sprint)]
-        completed_sprint_tasks = [t for t in (completed_results or []) if task_in_sprint(t, selected_sprint)]
-    else:
-        sprint_tasks = results
-        completed_sprint_tasks = completed_results or []
+    filters = filters or {}
+    selected_sprint = filters.get("sprint")
+    selected_assignees = filters.get("assignees")
+    selected_statuses = filters.get("statuses")
+
+    # results is already filtered, just use it directly
+    sprint_tasks = results
+
+    # Apply all filters to completed_results
+    completed_sprint_tasks = completed_results or []
+    if selected_sprint and selected_sprint != "All":
+        completed_sprint_tasks = [t for t in completed_sprint_tasks if task_in_sprint(t, selected_sprint)]
+    if selected_assignees and len(selected_assignees) > 0:
+        completed_sprint_tasks = [t for t in completed_sprint_tasks if t.assignee in selected_assignees]
+    if selected_statuses and len(selected_statuses) > 0:
+        completed_sprint_tasks = [t for t in completed_sprint_tasks if t.progress in selected_statuses]
 
     # Combine all tasks and find invalid ones
     all_tasks = sprint_tasks + completed_sprint_tasks
@@ -2272,10 +2281,25 @@ def render_download_buttons(
     results: list[TaskCompliance],
     summary: ReportSummary,
     config: Config,
-    completed_results: Optional[list[TaskCompliance]] = None
+    completed_results: Optional[list[TaskCompliance]] = None,
+    filters: Optional[dict] = None
 ):
     """Render download buttons."""
     st.subheader("Download Report")
+
+    # Apply filters to completed_results for Excel report
+    filters = filters or {}
+    filtered_completed = completed_results or []
+    selected_sprint = filters.get("sprint")
+    selected_assignees = filters.get("assignees")
+    selected_statuses = filters.get("statuses")
+
+    if selected_sprint and selected_sprint != "All":
+        filtered_completed = [t for t in filtered_completed if task_in_sprint(t, selected_sprint)]
+    if selected_assignees and len(selected_assignees) > 0:
+        filtered_completed = [t for t in filtered_completed if t.assignee in selected_assignees]
+    if selected_statuses and len(selected_statuses) > 0:
+        filtered_completed = [t for t in filtered_completed if t.progress in selected_statuses]
 
     col1, col2, col3 = st.columns(3)
 
@@ -2304,8 +2328,8 @@ def render_download_buttons(
             from asana_daily_report import ExcelReportGenerator
             excel_generator = ExcelReportGenerator(config)
             # Use generate_with_completed to include invalid points analysis
-            if completed_results:
-                workbook = excel_generator.generate_with_completed(results, completed_results, summary)
+            if filtered_completed:
+                workbook = excel_generator.generate_with_completed(results, filtered_completed, summary)
             else:
                 workbook = excel_generator.generate(results, summary)
             buffer = io.BytesIO()
@@ -2578,7 +2602,7 @@ def main():
     st.markdown("---")
 
     # Invalid Story Points Alert (Quick Wins) - Shows both active and completed tasks
-    render_invalid_story_points_section(filtered_results, completed_results, filters.get("sprint"))
+    render_invalid_story_points_section(filtered_results, completed_results, filters)
 
     # Overdue Tasks Alert (Quick Wins) - Most critical first
     render_overdue_alert_section(filtered_results)
@@ -2605,7 +2629,7 @@ def main():
     st.markdown("---")
 
     # Download buttons
-    render_download_buttons(filtered_results, filtered_summary, config, completed_results)
+    render_download_buttons(filtered_results, filtered_summary, config, completed_results, filters)
 
 
 if __name__ == "__main__":
