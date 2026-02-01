@@ -823,24 +823,28 @@ def render_login_screen():
             </div>
             """, unsafe_allow_html=True)
 
-        # Passcode input
-        passcode = st.text_input(
-            "Passcode",
-            type="password",
-            placeholder="••••••",
-            label_visibility="collapsed",
-            key="passcode_input"
-        )
+        # Use a form to ensure atomic submission of passcode
+        with st.form("login_form", clear_on_submit=False):
+            # Passcode input
+            passcode = st.text_input(
+                "Passcode",
+                type="password",
+                placeholder="••••••",
+                label_visibility="collapsed",
+                key="passcode_input"
+            )
 
-        # Login button
-        if st.button("Unlock", type="primary", use_container_width=True):
-            if check_passcode(passcode):
-                st.session_state["authenticated"] = True
-                st.session_state["auth_failed"] = False
-                st.rerun()
-            else:
-                st.session_state["auth_failed"] = True
-                st.rerun()
+            # Login button - form submission ensures passcode value is committed
+            submitted = st.form_submit_button("Unlock", type="primary", use_container_width=True)
+
+            if submitted:
+                if check_passcode(passcode):
+                    st.session_state["authenticated"] = True
+                    st.session_state["auth_failed"] = False
+                    st.rerun()
+                else:
+                    st.session_state["auth_failed"] = True
+                    st.rerun()
 
         # Footer
         st.markdown("""
