@@ -628,7 +628,11 @@ class ComplianceAnalyzer:
         sprints = set()
         for task in results:
             if task.sprint and task.sprint.strip():
-                sprints.add(task.sprint)
+                # Split comma-separated sprints (multi-enum values) into individual sprints
+                for s in task.sprint.split(","):
+                    s = s.strip()
+                    if s:
+                        sprints.add(s)
 
         def natural_sort_key(s: str):
             """Sort strings with embedded numbers naturally."""
