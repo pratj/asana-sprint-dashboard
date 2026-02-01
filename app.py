@@ -860,69 +860,68 @@ def render_login_screen():
 
 def render_sidebar():
     """Render sidebar with configuration."""
-    st.sidebar.title("Configuration")
+    with st.sidebar.expander("Configuration", expanded=False):
+        # Check for token in secrets or environment (secure sources)
+        default_token = ""
+        token_is_secure = False
+        try:
+            if "ASANA_ACCESS_TOKEN" in st.secrets:
+                default_token = st.secrets["ASANA_ACCESS_TOKEN"]
+                token_is_secure = True
+        except FileNotFoundError:
+            pass
 
-    # Check for token in secrets or environment (secure sources)
-    default_token = ""
-    token_is_secure = False
-    try:
-        if "ASANA_ACCESS_TOKEN" in st.secrets:
-            default_token = st.secrets["ASANA_ACCESS_TOKEN"]
+        if not default_token and os.environ.get("ASANA_ACCESS_TOKEN"):
+            default_token = os.environ.get("ASANA_ACCESS_TOKEN", "")
             token_is_secure = True
-    except FileNotFoundError:
-        pass
 
-    if not default_token and os.environ.get("ASANA_ACCESS_TOKEN"):
-        default_token = os.environ.get("ASANA_ACCESS_TOKEN", "")
-        token_is_secure = True
+        # Only show token input if NOT securely configured
+        if token_is_secure:
+            # Token is securely configured via secrets/env - hide input
+            token = default_token
+        else:
+            # No secure token - show input for local development only
+            st.subheader("Authentication")
+            token = st.text_input(
+                "Asana Access Token",
+                value="",
+                type="password",
+                help="Your Asana Personal Access Token"
+            )
+            st.caption(
+                "[Get token from Asana](https://app.asana.com/0/developer-console)"
+            )
+            st.markdown("---")
 
-    # Only show token input if NOT securely configured
-    if token_is_secure:
-        # Token is securely configured via secrets/env - hide input
-        token = default_token
-    else:
-        # No secure token - show input for local development only
-        st.sidebar.subheader("Authentication")
-        token = st.sidebar.text_input(
-            "Asana Access Token",
-            value="",
-            type="password",
-            help="Your Asana Personal Access Token"
+        st.subheader("Options")
+
+        fetch_comments = st.checkbox(
+            "Fetch Comments",
+            value=True,
+            help="Check for daily updates (slower but more accurate)"
         )
-        st.sidebar.caption(
-            "[Get token from Asana](https://app.asana.com/0/developer-console)"
+
+        fetch_completed = st.checkbox(
+            "Fetch Completed Tasks",
+            value=True,
+            help="Include completed tasks for burndown calculation"
         )
-        st.sidebar.markdown("---")
 
-    st.sidebar.subheader("Options")
+        min_description_length = st.number_input(
+            "Min Description Length",
+            min_value=50,
+            max_value=500,
+            value=100,
+            step=25,
+        )
 
-    fetch_comments = st.sidebar.checkbox(
-        "Fetch Comments",
-        value=True,
-        help="Check for daily updates (slower but more accurate)"
-    )
-
-    fetch_completed = st.sidebar.checkbox(
-        "Fetch Completed Tasks",
-        value=True,
-        help="Include completed tasks for burndown calculation"
-    )
-
-    min_description_length = st.sidebar.number_input(
-        "Min Description Length",
-        min_value=50,
-        max_value=500,
-        value=100,
-        step=25,
-    )
-
-    hours_without_update = st.sidebar.number_input(
-        "Hours Without Update",
-        min_value=12,
-        max_value=72,
-        value=24,
-        step=6,
-    )
+        hours_without_update = st.number_input(
+            "Hours Without Update",
+            min_value=12,
+            max_value=72,
+            value=24,
+            step=6,
+        )
 
     return {
         "token": token,
