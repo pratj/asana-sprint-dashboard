@@ -1516,12 +1516,12 @@ def render_overdue_alert_section(results: list[TaskCompliance]):
 
         # Action buttons
         btn_col1, btn_col2 = row_cols[5].columns(2)
-        if btn_col1.button("view", key=f"overdue_view_{idx}", help="View in app"):
+        if btn_col1.button("👁", key=f"overdue_view_{idx}", help="View in app"):
             st.session_state["selected_task_gid"] = task.gid
             st.session_state["selected_task_url"] = task.url
             st.session_state["selected_task_name"] = task.name
             st.rerun()
-        btn_col2.link_button("link", task.url, help="Open in Asana")
+        btn_col2.link_button("🔗", task.url, help="Open in Asana")
 
     st.markdown("---")
 
@@ -1591,12 +1591,12 @@ def render_due_this_week_section(results: list[TaskCompliance]):
 
         # Action buttons
         btn_col1, btn_col2 = row_cols[5].columns(2)
-        if btn_col1.button("view", key=f"due_soon_view_{idx}", help="View in app"):
+        if btn_col1.button("👁", key=f"due_soon_view_{idx}", help="View in app"):
             st.session_state["selected_task_gid"] = task.gid
             st.session_state["selected_task_url"] = task.url
             st.session_state["selected_task_name"] = task.name
             st.rerun()
-        btn_col2.link_button("link", task.url, help="Open in Asana")
+        btn_col2.link_button("🔗", task.url, help="Open in Asana")
 
     st.markdown("---")
 
@@ -1904,12 +1904,12 @@ def render_invalid_story_points_section(
 
         # Action buttons
         btn_col1, btn_col2 = row_cols[6].columns(2)
-        if btn_col1.button("view", key=f"invalid_view_{idx}", help="View in app"):
+        if btn_col1.button("👁", key=f"invalid_view_{idx}", help="View in app"):
             st.session_state["selected_task_gid"] = task.gid
             st.session_state["selected_task_url"] = task.url
             st.session_state["selected_task_name"] = task.name
             st.rerun()
-        btn_col2.link_button("link", task.url, help="Open in Asana")
+        btn_col2.link_button("🔗", task.url, help="Open in Asana")
 
     st.markdown("---")
 
@@ -2014,7 +2014,7 @@ def render_red_alert_section(results: list[TaskCompliance]):
             st.session_state["selected_task_url"] = task.url
             st.session_state["selected_task_name"] = task.name
             st.rerun()
-        btn_col2.link_button("↗", task.url, help="Open in Asana")
+        btn_col2.link_button("🔗",task.url, help="Open in Asana")
 
     st.markdown("---")
 
@@ -2069,7 +2069,7 @@ def render_amber_alert_section(results: list[TaskCompliance]):
             st.session_state["selected_task_url"] = task.url
             st.session_state["selected_task_name"] = task.name
             st.rerun()
-        btn_col2.link_button("↗", task.url, help="Open in Asana")
+        btn_col2.link_button("🔗",task.url, help="Open in Asana")
 
     st.markdown("---")
 
@@ -2162,7 +2162,7 @@ def render_task_table(tasks: list[TaskCompliance], title: str, columns: list[str
                 st.session_state["selected_task_url"] = t.url
                 st.session_state["selected_task_name"] = t.name
                 st.rerun()
-            btn_col2.link_button("↗", t.url, help="Open in Asana")
+            btn_col2.link_button("🔗",t.url, help="Open in Asana")
 
 
 def render_rule_violations_table(tasks: list[TaskCompliance], table_key: str = "rule_violations"):
@@ -2196,7 +2196,7 @@ def render_rule_violations_table(tasks: list[TaskCompliance], table_key: str = "
                 st.session_state["selected_task_url"] = t.url
                 st.session_state["selected_task_name"] = t.name
                 st.rerun()
-            btn_col2.link_button("↗", t.url, help="Open in Asana")
+            btn_col2.link_button("🔗",t.url, help="Open in Asana")
 
 
 def render_compliance_details(results: list[TaskCompliance]):
