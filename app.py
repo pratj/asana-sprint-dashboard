@@ -2338,7 +2338,7 @@ def render_invalid_story_points_section(
 
         # Status (show if completed)
         status = task.progress or "Done"
-        if task in [t for t, _ in invalid_tasks if t in (completed_sprint_tasks if selected_sprint else (completed_results or []))]:
+        if task in filtered_completed_tasks:
             status = "Completed"
         row_cols[5].write(status)
 
