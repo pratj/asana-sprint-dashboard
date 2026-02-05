@@ -987,10 +987,35 @@ def render_dashboard_filters(
             st.session_state["report_generated"] = False
             st.rerun()
 
+    # Completion Analytics Date Range Filter
+    st.subheader("Completion Date Range")
+    col_start, col_end = st.columns(2)
+    with col_start:
+        completion_start = st.date_input(
+            "From",
+            value=datetime.now().date() - timedelta(days=14),
+            help="Start date for completion analytics",
+            key="completion_date_start"
+        )
+    with col_end:
+        completion_end = st.date_input(
+            "To",
+            value=datetime.now().date(),
+            help="End date for completion analytics",
+            key="completion_date_end"
+        )
+
+    # Validate date range
+    if completion_start > completion_end:
+        st.error("Start date must be before or equal to end date")
+        completion_start = completion_end - timedelta(days=14)
+
     return {
         "sprint": selected_sprint if selected_sprint != "All" else None,
         "assignees": selected_assignees if selected_assignees else None,
         "statuses": selected_statuses if selected_statuses else None,
+        "completion_start": completion_start,
+        "completion_end": completion_end,
     }
 
 
@@ -1789,6 +1814,407 @@ def render_points_by_assignee_chart(
 
 
 # =============================================================================
+# Bug Count by Assignee Chart
+# =============================================================================
+
+def render_bug_count_chart(
+    results: list[TaskCompliance],
+    completed_results: Optional[list[TaskCompliance]] = None,
+    selected_sprint: Optional[str] = None
+) -> None:
+    """Render horizontal bar chart showing bug count per assignee."""
+    if not PLOTLY_AVAILABLE:
+        st.warning("Plotly is required for charts. Install with: pip install plotly")
+        return
+
+    # Filter for bugs only from active results
+    active_bugs = [t for t in results if t.task_type == "Bug"]
+
+    # Filter completed results for the selected sprint
+    if selected_sprint and selected_sprint != "All":
+        completed_sprint_bugs = [
+            t for t in (completed_results or [])
+            if t.task_type == "Bug" and task_in_sprint(t, selected_sprint)
+        ]
+    else:
+        completed_sprint_bugs = [t for t in (completed_results or []) if t.task_type == "Bug"]
+
+    # Count bugs per assignee
+    assignee_active_bugs: dict[str, int] = {}
+    assignee_completed_bugs: dict[str, int] = {}
+
+    for task in active_bugs:
+        assignee = task.assignee or "Unassigned"
+        if task.progress == "Done":
+            assignee_completed_bugs[assignee] = assignee_completed_bugs.get(assignee, 0) + 1
+        else:
+            assignee_active_bugs[assignee] = assignee_active_bugs.get(assignee, 0) + 1
+
+    for task in completed_sprint_bugs:
+        assignee = task.assignee or "Unassigned"
+        assignee_completed_bugs[assignee] = assignee_completed_bugs.get(assignee, 0) + 1
+
+    # Get all assignees
+    all_assignees = set(assignee_active_bugs.keys()) | set(assignee_completed_bugs.keys())
+
+    if not all_assignees:
+        st.info("No bugs found in this sprint")
+        return
+
+    # Calculate totals
+    total_active = sum(assignee_active_bugs.values())
+    total_completed = sum(assignee_completed_bugs.values())
+    total_all = total_active + total_completed
+
+    # Sort assignees by total bug count (descending)
+    assignee_totals = {
+        a: assignee_active_bugs.get(a, 0) + assignee_completed_bugs.get(a, 0)
+        for a in all_assignees
+    }
+    sorted_assignees = sorted(all_assignees, key=lambda a: assignee_totals[a], reverse=True)
+
+    # Prepare data for chart
+    active_values = [assignee_active_bugs.get(a, 0) for a in sorted_assignees]
+    completed_values = [assignee_completed_bugs.get(a, 0) for a in sorted_assignees]
+
+    # Neumorphic colors
+    nm_error = '#C9736D'    # Active bugs - coral/red
+    nm_success = '#5B9A8B'  # Completed bugs - green
+
+    fig = go.Figure()
+
+    # Completed bugs bar (green)
+    fig.add_trace(go.Bar(
+        y=sorted_assignees,
+        x=completed_values,
+        name='Completed',
+        orientation='h',
+        marker=dict(color=nm_success),
+        text=[f'{v}' if v > 0 else '' for v in completed_values],
+        textposition='inside',
+        hovertemplate='%{y}<br>Completed: %{x} bugs<extra></extra>'
+    ))
+
+    # Active bugs bar (red)
+    fig.add_trace(go.Bar(
+        y=sorted_assignees,
+        x=active_values,
+        name='Active',
+        orientation='h',
+        marker=dict(color=nm_error),
+        text=[f'{v}' if v > 0 else '' for v in active_values],
+        textposition='inside',
+        hovertemplate='%{y}<br>Active: %{x} bugs<extra></extra>'
+    ))
+
+    title_text = f"Bugs by Assignee ({total_completed}/{total_all} resolved)"
+
+    fig.update_layout(
+        title=dict(
+            text=title_text,
+            font=dict(size=16, color='#2D3748')
+        ),
+        barmode='stack',
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=max(300, len(sorted_assignees) * 40 + 100),
+        paper_bgcolor='#E4E8EC',
+        plot_bgcolor='#E4E8EC',
+        margin=dict(t=60, b=40, l=120, r=20),
+        xaxis=dict(
+            title="Bug Count",
+            gridcolor='rgba(163, 177, 198, 0.3)',
+            dtick=1,  # Integer tick marks for counts
+        ),
+        yaxis=dict(
+            title="",
+            autorange="reversed",  # Highest at top
+        ),
+    )
+
+    st.plotly_chart(fig, use_container_width=True, key="bugs_by_assignee")
+
+
+# =============================================================================
+# Completion Analytics - Tasks Completed by Team
+# =============================================================================
+
+def render_team_completion_chart(
+    completed_results: Optional[list[TaskCompliance]],
+    filters: dict,
+    selected_sprint: Optional[str] = None
+) -> dict:
+    """
+    Render daily completion chart for the team.
+    Returns daily_completions dict for consistency with individual chart.
+    """
+    if not PLOTLY_AVAILABLE:
+        st.warning("Plotly is required for charts. Install with: pip install plotly")
+        return {}
+
+    # Get date range from filters
+    completion_start = filters.get("completion_start", datetime.now().date() - timedelta(days=14))
+    completion_end = filters.get("completion_end", datetime.now().date())
+
+    # Filter completed tasks by sprint and date range
+    filtered_tasks = []
+    for task in (completed_results or []):
+        # Skip if no completed_at date
+        if not task.completed_at:
+            continue
+
+        # Parse completion date
+        try:
+            completed_date = datetime.strptime(task.completed_at[:10], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            continue
+
+        # Check date range
+        if not (completion_start <= completed_date <= completion_end):
+            continue
+
+        # Check sprint filter
+        if selected_sprint and not task_in_sprint(task, selected_sprint):
+            continue
+
+        filtered_tasks.append(task)
+
+    if not filtered_tasks:
+        st.info("No completed tasks found in the selected date range")
+        return {}
+
+    # Group tasks by completion date
+    daily_completions = {}
+    daily_points = {}
+
+    for task in filtered_tasks:
+        date_str = task.completed_at[:10]  # YYYY-MM-DD
+
+        if date_str not in daily_completions:
+            daily_completions[date_str] = []
+            daily_points[date_str] = 0
+
+        daily_completions[date_str].append(task)
+        try:
+            points = float(task.story_points) if task.story_points else 0
+        except (ValueError, TypeError):
+            points = 0
+        daily_points[date_str] += points
+
+    # Sort dates
+    sorted_dates = sorted(daily_completions.keys())
+    task_counts = [len(daily_completions[d]) for d in sorted_dates]
+    point_values = [daily_points[d] for d in sorted_dates]
+
+    # Neumorphic colors
+    nm_primary = '#6B7FD7'
+    nm_success = '#5B9A8B'
+    nm_text_primary = '#2D3748'
+    nm_bg = '#E4E8EC'
+
+    # Create figure with secondary y-axis
+    fig = go.Figure()
+
+    # Task count bars
+    fig.add_trace(go.Bar(
+        x=sorted_dates,
+        y=task_counts,
+        name='Tasks Completed',
+        marker=dict(color=nm_primary),
+        text=task_counts,
+        textposition='auto',
+        hovertemplate='%{x}<br>Tasks: %{y}<extra></extra>'
+    ))
+
+    # Story points line
+    fig.add_trace(go.Scatter(
+        x=sorted_dates,
+        y=point_values,
+        mode='lines+markers',
+        name='Story Points',
+        line=dict(color=nm_success, width=3),
+        marker=dict(size=8),
+        yaxis='y2',
+        hovertemplate='%{x}<br>Points: %{y:.0f}<extra></extra>'
+    ))
+
+    # Calculate totals
+    total_tasks = sum(task_counts)
+    total_points = sum(point_values)
+
+    fig.update_layout(
+        title=dict(
+            text=f"Tasks Completed by Team ({total_tasks} tasks, {total_points:.0f} pts)",
+            font=dict(size=16, color=nm_text_primary)
+        ),
+        xaxis=dict(
+            title="Date",
+            gridcolor='rgba(163, 177, 198, 0.3)',
+        ),
+        yaxis=dict(
+            title="Tasks Completed",
+            gridcolor='rgba(163, 177, 198, 0.3)',
+            rangemode='tozero',
+        ),
+        yaxis2=dict(
+            title="Story Points",
+            overlaying='y',
+            side='right',
+            rangemode='tozero',
+            gridcolor='rgba(163, 177, 198, 0.1)',
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=400,
+        paper_bgcolor=nm_bg,
+        plot_bgcolor=nm_bg,
+        margin=dict(t=60, b=40, l=60, r=60),
+        hovermode="x unified",
+    )
+
+    st.plotly_chart(fig, use_container_width=True, key="team_completion_chart")
+
+    return daily_completions
+
+
+# =============================================================================
+# Completion Analytics - Tasks Completed by Individuals
+# =============================================================================
+
+def render_individual_completion_chart(
+    completed_results: Optional[list[TaskCompliance]],
+    filters: dict,
+    selected_sprint: Optional[str] = None,
+    team_data: Optional[dict] = None
+) -> None:
+    """
+    Render daily completion chart grouped by individual assignees.
+    Uses same filtered data as team chart to ensure totals match.
+    """
+    if not PLOTLY_AVAILABLE:
+        st.warning("Plotly is required for charts. Install with: pip install plotly")
+        return
+
+    # Use team_data if provided (ensures consistency), otherwise filter again
+    if team_data:
+        daily_completions = team_data
+    else:
+        # Get date range from filters
+        completion_start = filters.get("completion_start", datetime.now().date() - timedelta(days=14))
+        completion_end = filters.get("completion_end", datetime.now().date())
+
+        # Filter completed tasks by sprint and date range
+        daily_completions = {}
+        for task in (completed_results or []):
+            if not task.completed_at:
+                continue
+            try:
+                completed_date = datetime.strptime(task.completed_at[:10], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                continue
+            if not (completion_start <= completed_date <= completion_end):
+                continue
+            if selected_sprint and not task_in_sprint(task, selected_sprint):
+                continue
+
+            date_str = task.completed_at[:10]
+            if date_str not in daily_completions:
+                daily_completions[date_str] = []
+            daily_completions[date_str].append(task)
+
+    if not daily_completions:
+        st.info("No completed tasks found in the selected date range")
+        return
+
+    # Get all unique assignees and dates
+    all_assignees = set()
+    for tasks in daily_completions.values():
+        for task in tasks:
+            all_assignees.add(task.assignee or "Unassigned")
+
+    sorted_dates = sorted(daily_completions.keys())
+    sorted_assignees = sorted(all_assignees)
+
+    # Build data matrix: assignee -> date -> count
+    assignee_date_counts = {a: {d: 0 for d in sorted_dates} for a in sorted_assignees}
+    for date_str, tasks in daily_completions.items():
+        for task in tasks:
+            assignee = task.assignee or "Unassigned"
+            assignee_date_counts[assignee][date_str] += 1
+
+    # Neumorphic color palette for assignees
+    assignee_colors = [
+        '#6B7FD7', '#5B9A8B', '#C9736D', '#D4A574', '#5A9AA8',
+        '#9B7ED9', '#7DB87D', '#E88E8E', '#F0B86E', '#6EC8D7',
+        '#C97BAF', '#85BB65', '#E8A07A', '#7B9FD4', '#D49A6A',
+    ]
+
+    nm_text_primary = '#2D3748'
+    nm_bg = '#E4E8EC'
+
+    fig = go.Figure()
+
+    # Add stacked bars for each assignee
+    for i, assignee in enumerate(sorted_assignees):
+        counts = [assignee_date_counts[assignee][d] for d in sorted_dates]
+        color = assignee_colors[i % len(assignee_colors)]
+
+        fig.add_trace(go.Bar(
+            x=sorted_dates,
+            y=counts,
+            name=assignee,
+            marker=dict(color=color),
+            hovertemplate=f'{assignee}<br>%{{x}}<br>Tasks: %{{y}}<extra></extra>'
+        ))
+
+    # Calculate totals for verification
+    total_individual = sum(
+        sum(assignee_date_counts[a][d] for d in sorted_dates)
+        for a in sorted_assignees
+    )
+    total_team = sum(len(tasks) for tasks in daily_completions.values())
+
+    title_text = f"Tasks Completed by Individual ({total_individual} tasks)"
+
+    fig.update_layout(
+        title=dict(
+            text=title_text,
+            font=dict(size=16, color=nm_text_primary)
+        ),
+        barmode='stack',
+        xaxis=dict(
+            title="Date",
+            gridcolor='rgba(163, 177, 198, 0.3)',
+        ),
+        yaxis=dict(
+            title="Tasks Completed",
+            gridcolor='rgba(163, 177, 198, 0.3)',
+            rangemode='tozero',
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(size=10)
+        ),
+        height=400,
+        paper_bgcolor=nm_bg,
+        plot_bgcolor=nm_bg,
+        margin=dict(t=80, b=40, l=60, r=20),
+        hovermode="x unified",
+    )
+
+    st.plotly_chart(fig, use_container_width=True, key="individual_completion_chart")
+
+    # Verification message
+    if total_individual == total_team:
+        st.success(f"Totals verified: {total_individual} tasks match between team and individual charts")
+    else:
+        st.warning(f"Total mismatch: Team={total_team}, Individual={total_individual}")
+
+
+# =============================================================================
 # Quick Wins - Invalid Story Points Section
 # =============================================================================
 
@@ -1824,20 +2250,26 @@ def render_invalid_story_points_section(
     selected_assignees = filters.get("assignees")
     selected_statuses = filters.get("statuses")
 
+    # DEBUG: Show what filters are being applied
+    st.caption(f"DEBUG - Filters: sprint={selected_sprint}, assignees={selected_assignees}, statuses={selected_statuses}")
+
     # results is already filtered, just use it directly
-    sprint_tasks = results
+    filtered_active_tasks = results
 
     # Apply all filters to completed_results
-    completed_sprint_tasks = completed_results or []
+    filtered_completed_tasks = completed_results or []
+    before_filter_count = len(filtered_completed_tasks)
     if selected_sprint and selected_sprint != "All":
-        completed_sprint_tasks = [t for t in completed_sprint_tasks if task_in_sprint(t, selected_sprint)]
+        filtered_completed_tasks = [t for t in filtered_completed_tasks if task_in_sprint(t, selected_sprint)]
     if selected_assignees and len(selected_assignees) > 0:
-        completed_sprint_tasks = [t for t in completed_sprint_tasks if t.assignee in selected_assignees]
+        filtered_completed_tasks = [t for t in filtered_completed_tasks if t.assignee in selected_assignees]
     if selected_statuses and len(selected_statuses) > 0:
-        completed_sprint_tasks = [t for t in completed_sprint_tasks if t.progress in selected_statuses]
+        filtered_completed_tasks = [t for t in filtered_completed_tasks if t.progress in selected_statuses]
+
+    st.caption(f"DEBUG - Completed tasks: {before_filter_count} -> {len(filtered_completed_tasks)} after filter")
 
     # Combine all tasks and find invalid ones
-    all_tasks = sprint_tasks + completed_sprint_tasks
+    all_tasks = filtered_active_tasks + filtered_completed_tasks
     invalid_tasks = []
 
     for task in all_tasks:
@@ -2598,6 +3030,21 @@ def main():
     with col_assignee:
         # Points by Assignee Chart (Quick Wins)
         render_points_by_assignee_chart(filtered_results, completed_results, filters.get("sprint"))
+
+    # Bug Count by Assignee Chart
+    render_bug_count_chart(filtered_results, completed_results, filters.get("sprint"))
+
+    st.markdown("---")
+
+    # Completion Analytics Section
+    st.subheader("Completion Analytics")
+    col_team, col_individual = st.columns(2)
+
+    with col_team:
+        team_data = render_team_completion_chart(completed_results, filters, filters.get("sprint"))
+
+    with col_individual:
+        render_individual_completion_chart(completed_results, filters, filters.get("sprint"), team_data)
 
     st.markdown("---")
 

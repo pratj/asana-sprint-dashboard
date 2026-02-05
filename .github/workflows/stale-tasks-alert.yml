@@ -1,0 +1,48 @@
+name: Stale Tasks Alert
+
+# Runs daily at 9:00 AM IST (3:30 AM UTC)
+# Also supports manual trigger for testing
+on:
+  schedule:
+    - cron: '30 3 * * *'  # 9:00 AM IST daily
+  workflow_dispatch:      # Manual trigger for testing
+
+jobs:
+  notify:
+    name: Send Stale Task Alerts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          cd asana-sprint-dashboard
+          pip install -r requirements.txt
+
+      - name: Send stale task alert email
+        run: python asana-sprint-dashboard/notify_email.py
+        env:
+          # Asana API
+          ASANA_ACCESS_TOKEN: ${{ secrets.ASANA_ACCESS_TOKEN }}
+
+          # SMTP Configuration
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+
+          # Email Recipients
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_CC: ${{ secrets.EMAIL_CC }}
+
+          # Stale threshold (default 24 hours)
+          STALE_TASK_HOURS: ${{ secrets.STALE_TASK_HOURS || '24' }}
