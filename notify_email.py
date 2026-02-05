@@ -12,11 +12,8 @@ Usage:
 
 Environment Variables:
     ASANA_ACCESS_TOKEN - Your Asana Personal Access Token
-    SMTP_HOST - SMTP server hostname
-    SMTP_PORT - SMTP server port (default: 587)
-    SMTP_USER - SMTP username
-    SMTP_PASSWORD - SMTP password
-    EMAIL_FROM - Sender email address
+    SENDGRID_API_KEY - SendGrid API key
+    EMAIL_FROM - Sender email address (must be verified in SendGrid)
     EMAIL_TO - Comma-separated recipient email addresses
     EMAIL_CC - Comma-separated CC email addresses (optional)
     STALE_TASK_HOURS - Hours threshold for stale tasks (default: 24)
@@ -24,10 +21,7 @@ Environment Variables:
 
 import os
 import sys
-import smtplib
 from datetime import datetime, timezone
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from typing import Optional
 
 try:
@@ -51,12 +45,9 @@ from asana_daily_report import (
 def get_config() -> dict:
     """Get email configuration from environment variables."""
     return {
-        "smtp_host": os.environ.get("SMTP_HOST", "smtp.conseroglobal.com"),
-        "smtp_port": int(os.environ.get("SMTP_PORT", "587")),
-        "smtp_user": os.environ.get("SMTP_USER", ""),
-        "smtp_password": os.environ.get("SMTP_PASSWORD", ""),
+        "sendgrid_api_key": os.environ.get("SENDGRID_API_KEY", ""),
         "email_from": os.environ.get("EMAIL_FROM", ""),
-        "email_to": os.environ.get("EMAIL_TO", "").split(","),
+        "email_to": [e.strip() for e in os.environ.get("EMAIL_TO", "").split(",") if e.strip()],
         "email_cc": [e.strip() for e in os.environ.get("EMAIL_CC", "").split(",") if e.strip()],
         "stale_hours": int(os.environ.get("STALE_TASK_HOURS", "24")),
     }
@@ -334,7 +325,7 @@ def format_email_plain(stale_tasks: list[TaskCompliance], hours_threshold: int) 
 
 
 # =============================================================================
-# Email Sending
+# Email Sending via SendGrid
 # =============================================================================
 
 def send_email(
@@ -343,62 +334,80 @@ def send_email(
     html_content: str,
     plain_content: str
 ) -> bool:
-    """Send email via SMTP."""
+    """Send email via SendGrid API."""
+    import urllib.request
+    import urllib.error
+    import json
 
     # Validate configuration
-    if not config["smtp_user"] or not config["smtp_password"]:
-        print("ERROR: SMTP credentials not configured")
+    if not config["sendgrid_api_key"]:
+        print("ERROR: SENDGRID_API_KEY not configured")
         return False
 
     if not config["email_from"]:
         print("ERROR: EMAIL_FROM not configured")
         return False
 
-    recipients = [e.strip() for e in config["email_to"] if e.strip()]
-    if not recipients:
+    if not config["email_to"]:
         print("ERROR: EMAIL_TO not configured")
         return False
 
-    # Create message
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = config["email_from"]
-    msg["To"] = ", ".join(recipients)
+    # Build SendGrid API payload
+    to_list = [{"email": email} for email in config["email_to"]]
+
+    personalizations = {
+        "to": to_list,
+    }
 
     if config["email_cc"]:
-        msg["Cc"] = ", ".join(config["email_cc"])
+        personalizations["cc"] = [{"email": email} for email in config["email_cc"]]
 
-    # Attach plain text and HTML versions
-    part1 = MIMEText(plain_content, "plain")
-    part2 = MIMEText(html_content, "html")
-    msg.attach(part1)
-    msg.attach(part2)
+    payload = {
+        "personalizations": [personalizations],
+        "from": {"email": config["email_from"]},
+        "subject": subject,
+        "content": [
+            {"type": "text/plain", "value": plain_content},
+            {"type": "text/html", "value": html_content},
+        ]
+    }
 
-    # All recipients (To + Cc)
-    all_recipients = recipients + config["email_cc"]
+    # Send via SendGrid API
+    url = "https://api.sendgrid.com/v3/mail/send"
+    headers = {
+        "Authorization": f"Bearer {config['sendgrid_api_key']}",
+        "Content-Type": "application/json",
+    }
 
     try:
-        print(f"Connecting to SMTP server {config['smtp_host']}:{config['smtp_port']}...")
+        print(f"Sending email via SendGrid...")
+        print(f"  From: {config['email_from']}")
+        print(f"  To: {', '.join(config['email_to'])}")
+        if config["email_cc"]:
+            print(f"  CC: {', '.join(config['email_cc'])}")
 
-        with smtplib.SMTP(config["smtp_host"], config["smtp_port"]) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
-            print(f"Authenticating as {config['smtp_user']}...")
-            server.login(config["smtp_user"], config["smtp_password"])
+        with urllib.request.urlopen(req) as response:
+            status = response.getcode()
+            if status in (200, 202):
+                print(f"Email sent successfully! (Status: {status})")
+                return True
+            else:
+                print(f"Unexpected status code: {status}")
+                return False
 
-            print(f"Sending email to {', '.join(all_recipients)}...")
-            server.sendmail(config["email_from"], all_recipients, msg.as_string())
-
-        print("Email sent successfully!")
-        return True
-
-    except smtplib.SMTPAuthenticationError as e:
-        print(f"ERROR: SMTP authentication failed: {e}")
+    except urllib.error.HTTPError as e:
+        print(f"ERROR: SendGrid API error: {e.code} {e.reason}")
+        try:
+            error_body = e.read().decode("utf-8")
+            print(f"  Details: {error_body}")
+        except Exception:
+            pass
         return False
-    except smtplib.SMTPException as e:
-        print(f"ERROR: SMTP error: {e}")
+    except urllib.error.URLError as e:
+        print(f"ERROR: Network error: {e.reason}")
         return False
     except Exception as e:
         print(f"ERROR: Failed to send email: {e}")
