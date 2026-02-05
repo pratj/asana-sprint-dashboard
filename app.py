@@ -1190,9 +1190,10 @@ def render_burndown_chart(
         return
 
     # Separate tasks by completion status
-    # "Done" tasks from incomplete list (progress="Done" but not marked complete in Asana)
-    done_tasks = [t for t in sprint_tasks if t.progress == "Done"]
-    active_tasks = [t for t in sprint_tasks if t.progress != "Done"]
+    # Tasks in Review, QA, or Done are considered "completed" for burndown purposes
+    completed_statuses = ("Review", "QA", "Done")
+    done_tasks = [t for t in sprint_tasks if t.progress in completed_statuses]
+    active_tasks = [t for t in sprint_tasks if t.progress not in completed_statuses]
 
     # Calculate total points (all tasks in sprint)
     total_points = 0
@@ -1441,6 +1442,8 @@ def render_sprint_progress_bar(
         completed_sprint_tasks = completed_results or []
 
     # Calculate total and completed points (same logic as burndown)
+    # Tasks in Review, QA, or Done are considered "completed" for progress tracking
+    completed_statuses = ("Review", "QA", "Done")
     total_points = 0
     completed_points = 0
 
@@ -1451,8 +1454,8 @@ def render_sprint_progress_bar(
         except (ValueError, TypeError):
             points = 0
         total_points += points
-        # Count "Done" status tasks as completed
-        if task.progress == "Done":
+        # Count Review, QA, Done status tasks as completed
+        if task.progress in completed_statuses:
             completed_points += points
 
     # Completed tasks from Asana (truly completed)
