@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -1167,7 +1168,8 @@ def task_in_sprint(task: TaskCompliance, sprint: str) -> bool:
 def render_burndown_chart(
     results: list[TaskCompliance],
     completed_results: Optional[list[TaskCompliance]] = None,
-    selected_sprint: Optional[str] = None
+    selected_sprint: Optional[str] = None,
+    target_sprint_points: Optional[int] = None
 ):
     """Render sprint burndown chart with actual progress line."""
     if not PLOTLY_AVAILABLE:
@@ -1190,15 +1192,25 @@ def render_burndown_chart(
         return
 
     # Separate tasks by completion status
-    # Tasks in Review, QA, or Done are considered "completed" for burndown purposes
-    completed_statuses = ("Review", "QA", "Done")
+    # Tasks in Review, QA, Ready to Ship, or Done are considered "completed" for burndown purposes
+    completed_statuses = ("Review", "QA", "Ready to Ship", "Done")
     done_tasks = [t for t in sprint_tasks if t.progress in completed_statuses]
     active_tasks = [t for t in sprint_tasks if t.progress not in completed_statuses]
 
     # Calculate total points (all tasks in sprint)
     total_points = 0
     completed_points = 0
-    completion_dates = {}  # date -> points completed that day
+    completion_dates = {}  # date -> {points, developers, tasks}
+
+    def _record_completion(date_key, pts, dev_name, task_obj):
+        """Helper to record a completion into completion_dates."""
+        if date_key not in completion_dates:
+            completion_dates[date_key] = {"points": 0, "developers": {}, "tasks": []}
+        completion_dates[date_key]["points"] += pts
+        completion_dates[date_key]["developers"][dev_name] = (
+            completion_dates[date_key]["developers"].get(dev_name, 0) + pts
+        )
+        completion_dates[date_key]["tasks"].append(task_obj)
 
     # Process active (not done) tasks
     for task in active_tasks:
@@ -1217,12 +1229,17 @@ def render_burndown_chart(
         total_points += points
         completed_points += points
 
-        # Use due_on as completion date approximation for Done tasks
-        if points > 0 and task.due_on:
-            completion_date = task.due_on
-            if completion_date not in completion_dates:
-                completion_dates[completion_date] = 0
-            completion_dates[completion_date] += points
+        # Use status_changed_at (when progress field changed), fallback to modified_at, then due_on
+        if points > 0:
+            dev_name = task.assignee or "Unassigned"
+            status_date = getattr(task, 'status_changed_at', None)
+            modified_date = getattr(task, 'modified_at', None)
+            if status_date:
+                _record_completion(status_date, points, dev_name, task)
+            elif modified_date:
+                _record_completion(modified_date[:10], points, dev_name, task)
+            elif task.due_on:
+                _record_completion(task.due_on, points, dev_name, task)
 
     # Process truly completed tasks from Asana
     for task in completed_sprint_tasks:
@@ -1233,88 +1250,109 @@ def render_burndown_chart(
         total_points += points
         completed_points += points
 
-        # Use completed_at for actual completion date
+        dev_name = task.assignee or "Unassigned"
+        status_date = getattr(task, 'status_changed_at', None)
+        modified_date = getattr(task, 'modified_at', None)
+        # Use completed_at, then status_changed_at, then modified_at, then due_on
         if points > 0 and task.completed_at:
-            completion_date = task.completed_at[:10]  # YYYY-MM-DD
-            if completion_date not in completion_dates:
-                completion_dates[completion_date] = 0
-            completion_dates[completion_date] += points
+            _record_completion(task.completed_at[:10], points, dev_name, task)
+        elif points > 0 and status_date:
+            _record_completion(status_date, points, dev_name, task)
+        elif points > 0 and modified_date:
+            _record_completion(modified_date[:10], points, dev_name, task)
         elif points > 0 and task.due_on:
-            # Fallback to due_on if no completed_at
-            completion_date = task.due_on
-            if completion_date not in completion_dates:
-                completion_dates[completion_date] = 0
-            completion_dates[completion_date] += points
+            _record_completion(task.due_on, points, dev_name, task)
 
     if total_points == 0:
         st.info("No story points found for this sprint")
         return
 
-    # Get date range from all tasks
-    all_dates = []
-    for t in sprint_tasks + completed_sprint_tasks:
-        if t.due_on:
-            try:
-                all_dates.append(datetime.strptime(t.due_on, "%Y-%m-%d"))
-            except ValueError:
-                pass
-        if t.created_at:
-            try:
-                all_dates.append(datetime.strptime(t.created_at[:10], "%Y-%m-%d"))
-            except ValueError:
-                pass
-
-    if not all_dates:
-        st.warning("No dates found. Cannot generate burndown chart.")
-        return
-
-    sprint_start = min(all_dates)
-    sprint_end = max(all_dates)
+    # Determine sprint boundaries — sprints start on Tuesday, run 10 working days (exclude weekends)
     today = datetime.now()
 
-    # Ensure reasonable date range
-    if (sprint_end - sprint_start).days < 7:
-        sprint_start = sprint_end - timedelta(days=14)
+    # Sprint start = most recent Tuesday on or before today
+    days_since_tuesday = (today.weekday() - 1) % 7  # Tuesday = weekday 1
+    sprint_start = (today - timedelta(days=days_since_tuesday)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Extend to today if sprint is ongoing
-    if today > sprint_end:
-        sprint_end = today
+    # Build list of 10 working days (skip Saturday=5, Sunday=6)
+    sprint_working_dates = []
+    current_date = sprint_start
+    while len(sprint_working_dates) < 10:
+        if current_date.weekday() < 5:  # Mon-Fri
+            sprint_working_dates.append(current_date)
+        current_date += timedelta(days=1)
 
-    sprint_days = (sprint_end - sprint_start).days + 1
-    if sprint_days <= 0:
-        sprint_days = 14
+    sprint_days = len(sprint_working_dates)  # 10
+    sprint_end = sprint_working_dates[-1]
 
-    # Generate date range
-    dates = []
+    # Also accumulate any weekend completions into the next working day
+    # so points completed on Sat/Sun aren't lost from the chart
+    all_calendar_dates = []
+    d = sprint_start
+    while d <= sprint_end:
+        all_calendar_dates.append(d)
+        d += timedelta(days=1)
+
+    # Map each calendar date to its nearest working day (for weekend rollup)
+    def _next_working_day(dt):
+        while dt.weekday() >= 5:
+            dt += timedelta(days=1)
+        return dt
+
+    # Roll weekend completion_dates into the following Monday
+    weekend_keys = [k for k in completion_dates if datetime.strptime(k, "%Y-%m-%d").weekday() >= 5]
+    for wk in weekend_keys:
+        wd = _next_working_day(datetime.strptime(wk, "%Y-%m-%d")).strftime("%Y-%m-%d")
+        if wd not in completion_dates:
+            completion_dates[wd] = {"points": 0, "developers": {}, "tasks": []}
+        completion_dates[wd]["points"] += completion_dates[wk]["points"]
+        for dev, pts in completion_dates[wk]["developers"].items():
+            completion_dates[wd]["developers"][dev] = completion_dates[wd]["developers"].get(dev, 0) + pts
+        completion_dates[wd].setdefault("tasks", []).extend(completion_dates[wk].get("tasks", []))
+        del completion_dates[wk]
+
+    # Generate sprint-day-based series (x-axis = Sprint Day 1, 2, 3, …, 10)
+    sprint_day_nums = []
+    real_dates = []
     ideal_line = []
     actual_line = []
+    hover_texts = []
 
-    daily_decrement = total_points / sprint_days
+    ideal_total = target_sprint_points if target_sprint_points else total_points
+    daily_decrement = ideal_total / sprint_days
     remaining = total_points
 
-    current_date = sprint_start
-    day_num = 0
+    for day_num, working_date in enumerate(sprint_working_dates):
+        date_str = working_date.strftime("%Y-%m-%d")
+        sprint_day = day_num + 1
+        sprint_day_nums.append(sprint_day)
+        real_dates.append(date_str)
 
-    while current_date <= sprint_end:
-        date_str = current_date.strftime("%Y-%m-%d")
-        dates.append(date_str)
-
-        # Ideal burndown
-        ideal_remaining = max(0, total_points - (daily_decrement * day_num))
-        ideal_line.append(ideal_remaining)
+        # Ideal burndown (uses target if set, otherwise total from tasks)
+        ideal_remaining = max(0, ideal_total - (daily_decrement * day_num))
+        ideal_line.append(round(ideal_remaining))
 
         # Actual burndown - subtract completed points up to this date
         if date_str in completion_dates:
-            remaining -= completion_dates[date_str]
+            remaining -= completion_dates[date_str]["points"]
 
         # Only show actual line up to today
-        if current_date <= today:
-            actual_line.append(max(0, remaining))
+        if working_date <= today:
+            actual_val = max(0, remaining)
+            actual_line.append(round(actual_val))
+            # Build hover text with developer breakdown
+            if date_str in completion_dates:
+                devs = completion_dates[date_str]["developers"]
+                dev_lines = [f"{name}: {pts:.0f} pts" for name, pts in sorted(devs.items())]
+                hover_texts.append(
+                    f"Day {sprint_day} ({date_str})<br>"
+                    f"Remaining: {actual_val:.0f} pts<br>" + "<br>".join(dev_lines)
+                )
+            else:
+                hover_texts.append(f"Day {sprint_day} ({date_str})<br>Remaining: {actual_val:.0f} pts")
         else:
             actual_line.append(None)
-
-        current_date += timedelta(days=1)
-        day_num += 1
+            hover_texts.append(None)
 
     # Create chart
     fig = go.Figure()
@@ -1328,7 +1366,7 @@ def render_burndown_chart(
 
     # Ideal burndown line
     fig.add_trace(go.Scatter(
-        x=dates,
+        x=sprint_day_nums,
         y=ideal_line,
         mode='lines',
         name='Ideal Burndown',
@@ -1337,22 +1375,24 @@ def render_burndown_chart(
 
     # Actual burndown line
     fig.add_trace(go.Scatter(
-        x=dates,
+        x=sprint_day_nums,
         y=actual_line,
         mode='lines+markers',
         name='Actual Burndown',
         line=dict(color=nm_success, width=3),
         marker=dict(size=6),
-        connectgaps=False
+        connectgaps=False,
+        hovertext=hover_texts,
+        hoverinfo="text"
     ))
 
-    # Current state marker
+    # Current state marker — find which sprint day is today
     today_str = today.strftime("%Y-%m-%d")
-    if today_str in dates:
-        idx = dates.index(today_str)
+    if today_str in real_dates:
+        idx = real_dates.index(today_str)
         current_remaining = actual_line[idx] if actual_line[idx] is not None else remaining
         fig.add_trace(go.Scatter(
-            x=[today_str],
+            x=[sprint_day_nums[idx]],
             y=[current_remaining],
             mode='markers',
             name='Today',
@@ -1362,22 +1402,29 @@ def render_burndown_chart(
 
     # Summary annotation
     pct_complete = (completed_points / total_points * 100) if total_points > 0 else 0
+    summary_text = f"Completed: {completed_points:.0f} / {total_points:.0f} pts ({pct_complete:.0f}%)"
+    if target_sprint_points:
+        summary_text += f" | Target: {ideal_total:.0f} pts"
     fig.add_annotation(
         x=0.02, y=0.98,
         xref="paper", yref="paper",
-        text=f"Completed: {completed_points:.0f} / {total_points:.0f} pts ({pct_complete:.0f}%)",
+        text=summary_text,
         showarrow=False,
         font=dict(size=14, color=nm_success),
         bgcolor="rgba(228,232,236,0.95)",
         borderpad=6
     )
 
+    # Date range for subtitle
+    start_label = sprint_start.strftime("%-m/%-d/%Y")
+    end_label = sprint_end.strftime("%-m/%-d/%Y")
+
     fig.update_layout(
         title=dict(
-            text=f"Sprint Burndown: {sprint}",
+            text=f"Sprint Burndown: {sprint}, {start_label} - {end_label}",
             font=dict(size=20, color=nm_text_primary)
         ),
-        xaxis_title="Date",
+        xaxis_title="Sprint Day",
         yaxis_title="Story Points Remaining",
         hovermode="x unified",
         showlegend=True,
@@ -1388,6 +1435,7 @@ def render_burndown_chart(
         plot_bgcolor=nm_bg,
         font=dict(color=nm_text_primary),
         xaxis=dict(
+            dtick=1,
             gridcolor='rgba(163, 177, 198, 0.3)',
             linecolor='rgba(163, 177, 198, 0.5)',
             tickcolor='rgba(163, 177, 198, 0.5)',
@@ -1401,26 +1449,414 @@ def render_burndown_chart(
 
     st.plotly_chart(fig, use_container_width=True, key="burndown_main")
 
-    # Download burndown data
-    col1, col2, col3 = st.columns([2, 1, 2])
-    with col2:
-        df_download = pd.DataFrame({
-            "Date": dates,
-            "Ideal Remaining": [round(p, 1) for p in ideal_line],
-            "Actual Remaining": [round(p, 1) if p is not None else "" for p in actual_line],
-        })
+    # Return data for the full-width table (rendered outside column layout)
+    pts_per_day = round(ideal_total / sprint_days, 1) if sprint_days > 0 else 0
+    completed_detail = []
+    for date_str in real_dates:
+        if date_str in completion_dates:
+            tasks = completion_dates[date_str]["tasks"]
+            lines = []
+            for t in tasks:
+                pts = float(t.story_points) if t.story_points else 0
+                lines.append(f"{t.name} ({t.assignee}, {pts:.0f}pts)")
+            completed_detail.append("; ".join(lines))
+        else:
+            completed_detail.append("")
 
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df_download.to_excel(writer, index=False, sheet_name='Burndown')
-        buffer.seek(0)
+    return {
+        "sprint_day_nums": sprint_day_nums,
+        "real_dates": real_dates,
+        "ideal_line": ideal_line,
+        "actual_line": actual_line,
+        "completed_detail": completed_detail,
+        "ideal_total": ideal_total,
+        "sprint_days": sprint_days,
+        "pts_per_day": pts_per_day,
+        "sprint": sprint,
+        "completion_dates": completion_dates,
+    }
 
-        st.download_button(
-            label="Download Burndown Data",
-            data=buffer,
-            file_name=f"burndown_{sprint.replace(' ', '_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+
+# =============================================================================
+# Burndown Excel Report Generator
+# =============================================================================
+
+_ASANA_PROFILE_RE = re.compile(
+    r'https?://app\.asana\.com/\d+/\d+/profile/(\d+)'
+)
+
+
+def _clean_comment_text(text: str, asana_client=None) -> str:
+    """Replace Asana @mention profile URLs with @Name and clean up whitespace."""
+
+    def _replace_mention(match):
+        user_gid = match.group(1)
+        if asana_client:
+            name = asana_client.get_user_name(user_gid)
+            if name:
+                return f"@{name}"
+        return ""
+
+    text = _ASANA_PROFILE_RE.sub(_replace_mention, text)
+    # Collapse leftover artifacts: "cc: " with nothing after, dangling dashes, etc.
+    text = re.sub(r'\bcc:\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\b[Cc]c:\s+(?=\s)', '', text)
+    # Collapse multiple spaces / blank lines
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{2,}', '\n', text)
+    return text.strip()
+
+
+def _extract_pr_links(notes: str | None, comments: list[dict]) -> str:
+    """Extract GitHub PR URLs from task notes and comments."""
+    pr_pattern = re.compile(r'https?://github\.com/[^\s)>\]]+/pull/\d+')
+    urls = set()
+    if notes:
+        urls.update(pr_pattern.findall(notes))
+    for comment in comments:
+        text = comment.get('text', '') or ''
+        urls.update(pr_pattern.findall(text))
+    return "\n".join(sorted(urls))
+
+
+def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint_tasks: list | None = None) -> bytes:
+    """Generate a rich multi-sheet Excel burndown report.
+
+    Sheet 1 (Summary): Burndown chart, stats, and daily summary table.
+    Sheets 2-11: One sheet per sprint day with completed task details.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.chart import LineChart, Reference
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    today_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # Shared styles
+    thin_border = Border(
+        left=Side(style='thin', color='D0D0D0'),
+        right=Side(style='thin', color='D0D0D0'),
+        top=Side(style='thin', color='D0D0D0'),
+        bottom=Side(style='thin', color='D0D0D0'),
+    )
+    dark_blue_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+    green_fill = PatternFill(start_color="2E7D32", end_color="2E7D32", fill_type="solid")
+    gray_fill = PatternFill(start_color="757575", end_color="757575", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    title_font = Font(bold=True, size=16, color="1F4E79")
+    subtitle_font = Font(bold=True, size=12, color="333333")
+    link_font = Font(color="1F4E79", underline="single")
+    bold_center = Font(bold=True, size=11)
+
+    # Day-type header fills
+    blue_fill = PatternFill(start_color="1565C0", end_color="1565C0", fill_type="solid")
+    amber_fill = PatternFill(start_color="F57F17", end_color="F57F17", fill_type="solid")
+
+    # Due/upcoming task styles (greyed out)
+    due_task_font = Font(color="999999", size=11)
+    due_task_fill = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")
+    due_task_link_font = Font(color="999999", underline="single")
+    due_task_bold = Font(color="999999", bold=True, size=11)
+    section_font = Font(color="666666", bold=True, italic=True, size=11)
+
+    # Status color fills
+    status_fills = {
+        "Review": PatternFill(start_color="BBDEFB", end_color="BBDEFB", fill_type="solid"),
+        "QA": PatternFill(start_color="FFE0B2", end_color="FFE0B2", fill_type="solid"),
+        "Ready to Ship": PatternFill(start_color="E1BEE7", end_color="E1BEE7", fill_type="solid"),
+        "Done": PatternFill(start_color="C8E6C9", end_color="C8E6C9", fill_type="solid"),
+    }
+
+    def _auto_width(ws):
+        for col_cells in ws.columns:
+            # Skip merged cells that lack column_letter
+            first = col_cells[0]
+            if not hasattr(first, 'column_letter'):
+                continue
+            col_letter = first.column_letter
+            max_len = 0
+            for cell in col_cells:
+                try:
+                    if hasattr(cell, 'value') and cell.value:
+                        max_len = max(max_len, min(len(str(cell.value)), 50))
+                except (TypeError, AttributeError):
+                    pass
+            ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+    def _style_header(ws, row, num_cols, fill):
+        for col in range(1, num_cols + 1):
+            cell = ws.cell(row=row, column=col)
+            cell.font = header_font
+            cell.fill = fill
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            cell.border = thin_border
+
+    # ── Sheet 1: Summary ────────────────────────────────────────────────
+    ws_summary = wb.active
+    ws_summary.title = "Summary"
+
+    sprint_name = burndown_data["sprint"]
+    ws_summary.cell(row=1, column=1, value=f"Sprint Burndown: {sprint_name}").font = title_font
+    ws_summary.cell(row=2, column=1, value=f"Generated: {today_str}").font = subtitle_font
+    ws_summary.merge_cells("A1:F1")
+    ws_summary.merge_cells("A2:F2")
+
+    # Stats table at row 4
+    stats_headers = ["Total Story Points", "# Days in Sprint", "Points / Day"]
+    stats_values = [
+        f"{burndown_data['ideal_total']:.0f}",
+        str(burndown_data['sprint_days']),
+        f"{burndown_data['pts_per_day']:.1f}",
+    ]
+    for i, h in enumerate(stats_headers):
+        cell = ws_summary.cell(row=4, column=i + 1, value=h)
+        cell.font = header_font
+        cell.fill = dark_blue_fill
+        cell.alignment = Alignment(horizontal='center')
+        cell.border = thin_border
+    for i, v in enumerate(stats_values):
+        cell = ws_summary.cell(row=5, column=i + 1, value=v)
+        cell.alignment = Alignment(horizontal='center')
+        cell.font = bold_center
+        cell.border = thin_border
+
+    # Burndown data table starting at row 7
+    bd_headers = ["Sprint Day", "Date", "Ideal", "Actual", "Completed Tasks"]
+    for i, h in enumerate(bd_headers):
+        cell = ws_summary.cell(row=7, column=i + 1, value=h)
+        cell.font = header_font
+        cell.fill = dark_blue_fill
+        cell.alignment = Alignment(horizontal='center', wrap_text=True)
+        cell.border = thin_border
+
+    for row_idx, (day_num, date, ideal, actual, detail) in enumerate(zip(
+        burndown_data["sprint_day_nums"],
+        burndown_data["real_dates"],
+        burndown_data["ideal_line"],
+        burndown_data["actual_line"],
+        burndown_data["completed_detail"],
+    ), start=8):
+        ws_summary.cell(row=row_idx, column=1, value=day_num).border = thin_border
+        ws_summary.cell(row=row_idx, column=2, value=date).border = thin_border
+        ws_summary.cell(row=row_idx, column=3, value=ideal).border = thin_border
+        actual_cell = ws_summary.cell(row=row_idx, column=4, value=actual if actual is not None else "")
+        actual_cell.border = thin_border
+        detail_cell = ws_summary.cell(row=row_idx, column=5, value=detail)
+        detail_cell.border = thin_border
+        detail_cell.alignment = Alignment(wrap_text=True)
+
+    # Burndown line chart
+    data_end_row = 7 + len(burndown_data["sprint_day_nums"])
+    chart = LineChart()
+    chart.title = f"Burndown: {sprint_name}"
+    chart.x_axis.title = "Sprint Day"
+    chart.y_axis.title = "Story Points Remaining"
+    chart.style = 10
+    chart.width = 22
+    chart.height = 14
+
+    ideal_ref = Reference(ws_summary, min_col=3, min_row=7, max_row=data_end_row)
+    actual_ref = Reference(ws_summary, min_col=4, min_row=7, max_row=data_end_row)
+    cats = Reference(ws_summary, min_col=1, min_row=8, max_row=data_end_row)
+
+    chart.add_data(ideal_ref, titles_from_data=True)
+    chart.add_data(actual_ref, titles_from_data=True)
+    chart.set_categories(cats)
+
+    # Style chart lines
+    s_ideal = chart.series[0]
+    s_ideal.graphicalProperties.line.dashStyle = "dash"
+    s_ideal.graphicalProperties.line.solidFill = "1F4E79"
+    s_actual = chart.series[1]
+    s_actual.graphicalProperties.line.solidFill = "2E7D32"
+
+    chart_row = data_end_row + 2
+    ws_summary.add_chart(chart, f"A{chart_row}")
+
+    _auto_width(ws_summary)
+    ws_summary.freeze_panes = "A8"
+
+    # ── Sheets 2-11: Per-Day Task Details ────────────────────────────────
+    completion_dates = burndown_data.get("completion_dates", {})
+    today_date = datetime.now().strftime("%Y-%m-%d")
+
+    # Build due-by-date index from all sprint tasks
+    due_by_date: dict[str, list] = {}
+    if all_sprint_tasks:
+        for task in all_sprint_tasks:
+            if getattr(task, 'due_on', None):
+                due_by_date.setdefault(task.due_on, []).append(task)
+        # Roll weekend due dates into the following Monday
+        weekend_keys = [k for k in due_by_date if datetime.strptime(k, "%Y-%m-%d").weekday() >= 5]
+        for wk in weekend_keys:
+            dt_wk = datetime.strptime(wk, "%Y-%m-%d")
+            while dt_wk.weekday() >= 5:
+                dt_wk += timedelta(days=1)
+            monday = dt_wk.strftime("%Y-%m-%d")
+            due_by_date.setdefault(monday, []).extend(due_by_date[wk])
+            del due_by_date[wk]
+    day_columns = [
+        "Task Name", "Asana Link", "Assignee", "QA Assignee",
+        "Story Points", "Type", "Epic", "Status",
+        "Status Changed", "GitHub PR", "Comments",
+    ]
+
+    def _write_task_row(ws, row, task_obj, greyed_out=False):
+        """Write a single task row. When greyed_out=True, use muted styles for due tasks."""
+        # Fetch comments and extract PR links
+        task_comments = []
+        comments_text = ""
+        pr_links = ""
+        try:
+            if asana_client:
+                task_comments = asana_client.get_task_comments(task_obj.gid, limit=10)
+                comment_lines = []
+                for c in task_comments:
+                    created_by = c.get('created_by') or {}
+                    author = created_by.get('name')
+                    if not author and asana_client and created_by.get('gid'):
+                        author = asana_client.get_user_name(created_by['gid']) or 'Unknown'
+                    author = author or 'Unknown'
+                    raw = (c.get('text') or '')[:300]
+                    text = _clean_comment_text(raw, asana_client)
+                    date = (c.get('created_at') or '')[:10]
+                    if text:
+                        comment_lines.append(f"[{author} {date}] {text}")
+                comments_text = "\n".join(comment_lines)
+                pr_links = _extract_pr_links(task_obj.notes, task_comments)
+        except Exception as e:
+            print(f"Warning: Could not fetch comments for task {task_obj.gid}: {e}")
+
+        pts = float(task_obj.story_points) if task_obj.story_points else 0
+
+        values = [
+            task_obj.name,                              # Task Name
+            task_obj.url,                               # Asana Link
+            task_obj.assignee or "Unassigned",          # Assignee
+            task_obj.qa_assignee or "",                 # QA Assignee
+            pts,                                        # Story Points
+            task_obj.task_type or "",                   # Type
+            task_obj.epic or "",                        # Epic
+            task_obj.progress or "",                    # Status
+            task_obj.status_changed_at or "",           # Status Changed
+            pr_links,                                   # GitHub PR
+            comments_text,                              # Comments
+        ]
+
+        for col_idx, val in enumerate(values, 1):
+            cell = ws.cell(row=row, column=col_idx, value=val)
+            cell.border = thin_border
+            cell.alignment = Alignment(vertical='top', wrap_text=True)
+            if greyed_out:
+                cell.font = due_task_font
+                cell.fill = due_task_fill
+
+        # Hyperlink for Asana Link column (col 2)
+        link_cell = ws.cell(row=row, column=2)
+        link_cell.hyperlink = task_obj.url
+        link_cell.font = due_task_link_font if greyed_out else link_font
+        link_cell.value = "Open in Asana"
+
+        # Bold + centered for Story Points (col 5)
+        pts_cell = ws.cell(row=row, column=5)
+        pts_cell.font = due_task_bold if greyed_out else bold_center
+        pts_cell.alignment = Alignment(horizontal='center', vertical='top')
+
+        # Color code status cell (col 8) — skip for greyed-out rows
+        if not greyed_out:
+            status_cell = ws.cell(row=row, column=8)
+            status = task_obj.progress or ""
+            if status in status_fills:
+                status_cell.fill = status_fills[status]
+
+    for day_num, date_str in zip(burndown_data["sprint_day_nums"], burndown_data["real_dates"]):
+        # Sheet name like "Day 1 (Feb 3)"
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        sheet_name = f"Day {day_num} ({dt.strftime('%b')} {dt.day})"
+        ws = wb.create_sheet(title=sheet_name)
+
+        # Classify the day
+        is_today = (date_str == today_date)
+        is_future = (date_str > today_date)
+
+        # Gather completed tasks
+        completed_tasks = []
+        if date_str in completion_dates:
+            completed_tasks = completion_dates[date_str].get("tasks", [])
+
+        # Gather due tasks for today/future (exclude already-completed tasks)
+        due_tasks = []
+        if (is_today or is_future) and date_str in due_by_date:
+            completed_gids = {t.gid for t in completed_tasks}
+            due_tasks = [t for t in due_by_date[date_str] if t.gid not in completed_gids]
+
+        has_completed = bool(completed_tasks)
+        has_due = bool(due_tasks)
+        has_any = has_completed or has_due
+
+        # Determine header fill and label suffix
+        if is_today:
+            header_fill = blue_fill
+            label_suffix = " (TODAY)"
+        elif is_future:
+            header_fill = amber_fill
+            label_suffix = " (Upcoming)"
+        elif has_completed:
+            header_fill = green_fill
+            label_suffix = ""
+        else:
+            header_fill = gray_fill
+            label_suffix = ""
+
+        # Header row
+        header_text = f"Sprint Day {day_num} — {date_str}{label_suffix}"
+        ws.cell(row=1, column=1, value=header_text).font = title_font
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(day_columns))
+        for col in range(1, len(day_columns) + 1):
+            ws.cell(row=1, column=col).fill = header_fill
+            ws.cell(row=1, column=col).font = Font(bold=True, color="FFFFFF", size=14)
+
+        if not has_any:
+            ws.cell(row=3, column=1, value="No tasks completed or due this day").font = Font(
+                italic=True, size=12, color="757575"
+            )
+            ws.freeze_panes = "A3"
+            continue
+
+        # Column headers at row 3
+        _style_header(ws, 3, len(day_columns), dark_blue_fill)
+        for i, h in enumerate(day_columns):
+            ws.cell(row=3, column=i + 1, value=h)
+        _style_header(ws, 3, len(day_columns), dark_blue_fill)
+
+        current_row = 4
+
+        # Write completed tasks (normal styling)
+        for task_obj in completed_tasks:
+            _write_task_row(ws, current_row, task_obj, greyed_out=False)
+            current_row += 1
+
+        # Separator row if both groups exist
+        if has_completed and has_due:
+            sep_cell = ws.cell(row=current_row, column=1, value="--- Due/Upcoming Tasks ---")
+            sep_cell.font = section_font
+            ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=len(day_columns))
+            current_row += 1
+
+        # Write due tasks (greyed out)
+        for task_obj in due_tasks:
+            _write_task_row(ws, current_row, task_obj, greyed_out=True)
+            current_row += 1
+
+        _auto_width(ws)
+        ws.freeze_panes = "A4"
+
+    # Write to bytes
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # =============================================================================
@@ -1442,8 +1878,8 @@ def render_sprint_progress_bar(
         completed_sprint_tasks = completed_results or []
 
     # Calculate total and completed points (same logic as burndown)
-    # Tasks in Review, QA, or Done are considered "completed" for progress tracking
-    completed_statuses = ("Review", "QA", "Done")
+    # Tasks in Review, QA, Ready to Ship, or Done are considered "completed" for progress tracking
+    completed_statuses = ("Review", "QA", "Ready to Ship", "Done")
     total_points = 0
     completed_points = 0
 
@@ -3027,12 +3463,91 @@ def main():
     col_burndown, col_assignee = st.columns([3, 2])
 
     with col_burndown:
+        target_sprint_points = st.number_input(
+            "Target Sprint Points",
+            min_value=0,
+            value=0,
+            step=1,
+            help="Total story points the team aims to complete (ideal: 13 per developer). 0 = auto from tasks.",
+            key="target_sprint_points"
+        )
         # Burndown chart
-        render_burndown_chart(filtered_results, completed_results, filters.get("sprint"))
+        burndown_data = render_burndown_chart(
+            filtered_results, completed_results, filters.get("sprint"),
+            target_sprint_points=target_sprint_points if target_sprint_points > 0 else None
+        )
 
     with col_assignee:
         # Points by Assignee Chart (Quick Wins)
         render_points_by_assignee_chart(filtered_results, completed_results, filters.get("sprint"))
+
+    # Burndown summary table — full page width (outside column layout)
+    if burndown_data:
+        bd = burndown_data
+        # Expand completed tasks into separate rows so nothing is truncated
+        table_rows = []
+        for day_num, date, ideal, actual, detail in zip(
+            bd["sprint_day_nums"],
+            bd["real_dates"],
+            bd["ideal_line"],
+            bd["actual_line"],
+            bd["completed_detail"],
+        ):
+            tasks = [t.strip() for t in detail.split(";") if t.strip()] if detail else []
+            if tasks:
+                for i, task in enumerate(tasks):
+                    table_rows.append({
+                        "Sprint Day": day_num if i == 0 else "",
+                        "Date": date if i == 0 else "",
+                        "Ideal Remaining (pts)": ideal if i == 0 else "",
+                        "Actual Remaining (pts)": (actual if actual is not None else "") if i == 0 else "",
+                        "Completed Task": task,
+                    })
+            else:
+                table_rows.append({
+                    "Sprint Day": day_num,
+                    "Date": date,
+                    "Ideal Remaining (pts)": ideal,
+                    "Actual Remaining (pts)": actual if actual is not None else "",
+                    "Completed Task": "",
+                })
+        df_table = pd.DataFrame(table_rows)
+        num_rows = len(df_table)
+        row_height = 35
+        table_height = min(max(num_rows * row_height + 50, 200), 500)
+        st.dataframe(
+            df_table,
+            use_container_width=True,
+            hide_index=True,
+            height=table_height,
+            column_config={
+                "Sprint Day": st.column_config.TextColumn(width="small"),
+                "Date": st.column_config.TextColumn(width="small"),
+                "Ideal Remaining (pts)": st.column_config.TextColumn(width="small"),
+                "Actual Remaining (pts)": st.column_config.TextColumn(width="small"),
+                "Completed Task": st.column_config.TextColumn(width="large"),
+            },
+        )
+
+        # Summary stats row
+        stat_cols = st.columns(3)
+        stat_cols[0].metric("Total Story Points", f"{bd['ideal_total']:.0f}")
+        stat_cols[1].metric("# Days in Sprint", bd["sprint_days"])
+        stat_cols[2].metric("Points to Complete / Day", f"{bd['pts_per_day']:.1f}")
+
+        # Download burndown data (rich multi-sheet Excel report)
+        col_dl1, col_dl2, col_dl3 = st.columns([2, 1, 2])
+        with col_dl2:
+            today_date = datetime.now().strftime("%Y-%m-%d")
+            sprint_slug = bd['sprint'].replace(' ', '_')
+            all_sprint_tasks = list(filtered_results) + list(completed_results or [])
+            excel_bytes = generate_burndown_excel_report(bd, reporter.client, all_sprint_tasks=all_sprint_tasks)
+            st.download_button(
+                label="Download Burndown Data",
+                data=excel_bytes,
+                file_name=f"burndown_{sprint_slug}_{today_date}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
     # Bug Count by Assignee Chart
     render_bug_count_chart(filtered_results, completed_results, filters.get("sprint"))
