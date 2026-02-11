@@ -1267,12 +1267,24 @@ def render_burndown_chart(
         st.info("No story points found for this sprint")
         return
 
-    # Determine sprint boundaries — sprints start on Tuesday, run 10 working days (exclude weekends)
+    # Determine sprint boundaries (2-week sprints, 10 working days)
     today = datetime.now()
 
-    # Sprint start = most recent Tuesday on or before today
-    days_since_tuesday = (today.weekday() - 1) % 7  # Tuesday = weekday 1
-    sprint_start = (today - timedelta(days=days_since_tuesday)).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Use anchor date to compute current sprint start (2-week cadence)
+    anchor_str = os.environ.get("SPRINT_ANCHOR_DATE", "2026-02-03")
+    try:
+        anchor = datetime.strptime(anchor_str, "%Y-%m-%d")
+        days_since_anchor = (today - anchor).days
+        current_sprint_offset = (days_since_anchor // 14) * 14
+        sprint_start = (anchor + timedelta(days=current_sprint_offset)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+    except ValueError:
+        # Fallback: most recent Monday on or before today
+        days_since_monday = today.weekday()
+        sprint_start = (today - timedelta(days=days_since_monday)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
 
     # Build list of 10 working days (skip Saturday=5, Sunday=6)
     sprint_working_dates = []
