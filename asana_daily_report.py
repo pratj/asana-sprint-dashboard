@@ -108,6 +108,9 @@ class Config:
     points_field_gid: str = field(
         default_factory=lambda: os.environ.get("ASANA_POINTS_FIELD_GID", "1210724432100820")
     )
+    qa_assignee_field_gid: str = field(
+        default_factory=lambda: os.environ.get("ASANA_QA_ASSIGNEE_FIELD_GID", "")
+    )
 
     # Progress statuses requiring daily updates
     active_statuses: tuple = ("In Progress", "Review", "QA")
@@ -146,6 +149,8 @@ class TaskCompliance:
     assignee: str
     assignee_gid: Optional[str]
     created_at: str
+    modified_at: Optional[str] = None   # ISO datetime when task was last modified
+    status_changed_at: Optional[str] = None  # ISO date when progress/status field last changed
 
     # Current state
     progress: Optional[str] = None
@@ -158,6 +163,8 @@ class TaskCompliance:
     task_type: Optional[str] = None
     story_points: Optional[str] = None
     severity: Optional[str] = None
+    qa_assignee: Optional[str] = None
+    notes: Optional[str] = None
     description_length: int = 0
 
     # Comments/Updates
@@ -317,6 +324,25 @@ class AsanaClient:
         self.api_client = asana.ApiClient(configuration)
         self.tasks_api = asana.TasksApi(self.api_client)
         self.stories_api = asana.StoriesApi(self.api_client)
+        self.users_api = asana.UsersApi(self.api_client)
+        self._user_name_cache: dict[str, str] = {}  # gid -> display name
+
+    def get_user_name(self, user_gid: str) -> Optional[str]:
+        """Resolve a user GID to their display name (cached)."""
+        if user_gid in self._user_name_cache:
+            return self._user_name_cache[user_gid]
+        try:
+            result = self.users_api.get_user(
+                user_gid, opts={"opt_fields": "name"}
+            )
+            user = result.to_dict() if hasattr(result, 'to_dict') else dict(result)
+            name = user.get('name')
+            if name:
+                self._user_name_cache[user_gid] = name
+            return name
+        except ApiException:
+            self._user_name_cache[user_gid] = None
+            return None
 
     def get_tasks(
         self,
@@ -402,6 +428,39 @@ class AsanaClient:
 
         return comments
 
+    def get_status_change_date(self, task_gid: str, progress_field_gid: str) -> Optional[str]:
+        """Fetch the FIRST date when the task moved into a completed status.
+
+        A task is counted as completed once — the first time its progress
+        field changes to Review, QA, Ready to Ship, or Done.
+
+        Returns ISO date string (YYYY-MM-DD) or None.
+        """
+        completed_statuses = {"Review", "QA", "Ready to Ship", "Done"}
+        try:
+            result = self.stories_api.get_stories_for_task(
+                task_gid,
+                opts={
+                    "opt_fields": "created_at,resource_subtype,new_enum_value,new_enum_value.name",
+                    "limit": 100
+                }
+            )
+            for story in result:
+                story_dict = story.to_dict() if hasattr(story, 'to_dict') else dict(story)
+                subtype = story_dict.get('resource_subtype', '')
+                if subtype == 'enum_custom_field_changed':
+                    new_value = story_dict.get('new_enum_value') or {}
+                    new_name = new_value.get('name', '')
+                    # Return the first time it entered a completed status
+                    if new_name in completed_statuses:
+                        created = story_dict.get('created_at', '')
+                        if created:
+                            return created[:10]
+            return None
+        except ApiException as e:
+            print(f"Error fetching stories for task {task_gid}: {e}")
+            return None
+
 
 # =============================================================================
 # Compliance Analyzer
@@ -434,7 +493,7 @@ class ComplianceAnalyzer:
 
         # Extract custom fields
         custom_fields = task.get('custom_fields', []) or []
-        sprint = epic = progress = task_type = severity = story_points = None
+        sprint = epic = progress = task_type = severity = story_points = qa_assignee = None
 
         for cf in custom_fields:
             if not cf:
@@ -455,6 +514,8 @@ class ComplianceAnalyzer:
                 severity = display_value
             elif cf_gid == self.config.points_field_gid:
                 story_points = str(number_value) if number_value is not None else None
+            elif self.config.qa_assignee_field_gid and cf_gid == self.config.qa_assignee_field_gid:
+                qa_assignee = display_value
 
         # Create compliance record
         compliance = TaskCompliance(
@@ -464,6 +525,7 @@ class ComplianceAnalyzer:
             assignee=assignee,
             assignee_gid=assignee_gid,
             created_at=created_at,
+            modified_at=modified_at,
             progress=progress,
             due_on=due_on,
             completed_at=completed_at,
@@ -472,8 +534,17 @@ class ComplianceAnalyzer:
             task_type=task_type,
             story_points=story_points,
             severity=severity,
+            qa_assignee=qa_assignee,
+            notes=notes,
             description_length=len(notes),
         )
+
+        # Fetch status change date for tasks in completed-like statuses
+        completed_statuses = ("Review", "QA", "Ready to Ship", "Done")
+        if progress in completed_statuses:
+            status_date = self.client.get_status_change_date(gid, self.config.progress_field_gid)
+            if status_date:
+                compliance.status_changed_at = status_date
 
         # Calculate overdue and due soon (Quick Wins)
         from datetime import date
