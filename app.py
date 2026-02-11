@@ -1191,6 +1191,16 @@ def render_burndown_chart(
         st.info("No tasks found for burndown chart")
         return
 
+    # Exclude QA testers from burndown calculations
+    QA_TESTERS = ("Dimpi Gogoi", "Vinay")
+    def _is_qa_tester(assignee):
+        if not assignee:
+            return False
+        return any(assignee.startswith(qa) for qa in QA_TESTERS)
+
+    sprint_tasks = [t for t in sprint_tasks if not _is_qa_tester(t.assignee)]
+    completed_sprint_tasks = [t for t in completed_sprint_tasks if not _is_qa_tester(t.assignee)]
+
     # Separate tasks by completion status
     # Tasks in Review, QA, Ready to Ship, or Done are considered "completed" for burndown purposes
     completed_statuses = ("Review", "QA", "Ready to Ship", "Done")
