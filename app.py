@@ -1461,6 +1461,37 @@ def render_burndown_chart(
 
     st.plotly_chart(fig, use_container_width=True, key="burndown_main")
 
+    # Per-developer point breakdown
+    all_burndown_tasks = list(sprint_tasks) + list(completed_sprint_tasks)
+    dev_points = {}  # developer -> {total, completed, tasks}
+    for t in all_burndown_tasks:
+        try:
+            pts = float(t.story_points) if t.story_points else 0
+        except (ValueError, TypeError):
+            pts = 0
+        dev = t.assignee or "Unassigned"
+        if dev not in dev_points:
+            dev_points[dev] = {"total": 0, "completed": 0, "tasks": []}
+        dev_points[dev]["total"] += pts
+        is_done = (t.progress in completed_statuses) or (t.completed_at is not None)
+        if is_done:
+            dev_points[dev]["completed"] += pts
+        dev_points[dev]["tasks"].append({"name": t.name, "points": pts, "status": t.progress or "Completed"})
+
+    with st.expander("Points Breakdown by Developer"):
+        breakdown_rows = []
+        for dev, data in sorted(dev_points.items(), key=lambda x: x[1]["total"], reverse=True):
+            breakdown_rows.append({
+                "Developer": dev,
+                "Total Pts": int(data["total"]),
+                "Completed Pts": int(data["completed"]),
+                "Remaining Pts": int(data["total"] - data["completed"]),
+                "# Tasks": len(data["tasks"]),
+            })
+        if breakdown_rows:
+            st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True, hide_index=True)
+            st.caption(f"Sprint total: {int(total_points)} pts across {len(dev_points)} developers")
+
     # Return data for the full-width table (rendered outside column layout)
     pts_per_day = round(ideal_total / sprint_days, 1) if sprint_days > 0 else 0
     completed_detail = []
