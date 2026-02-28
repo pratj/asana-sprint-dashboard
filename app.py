@@ -1165,11 +1165,30 @@ def task_in_sprint(task: TaskCompliance, sprint: str) -> bool:
     return sprint in task_sprints
 
 
+def classify_sprint_task(task: TaskCompliance, sprint: str) -> str:
+    """Classify a task's relationship to the selected sprint.
+
+    Returns:
+        "current_only" - task is tagged with only the selected sprint
+        "spillover"    - task is tagged with selected sprint AND other sprints
+        "carry_in"     - task is NOT tagged with selected sprint
+    """
+    if not task.sprint:
+        return "carry_in"
+    task_sprints = [s.strip() for s in task.sprint.split(",")]
+    if sprint not in task_sprints:
+        return "carry_in"
+    if len(task_sprints) > 1:
+        return "spillover"
+    return "current_only"
+
+
 def render_burndown_chart(
     results: list[TaskCompliance],
     completed_results: Optional[list[TaskCompliance]] = None,
     selected_sprint: Optional[str] = None,
-    target_sprint_points: Optional[int] = None
+    target_sprint_points: Optional[int] = None,
+    all_results: Optional[list[TaskCompliance]] = None,
 ):
     """Render sprint burndown chart with actual progress line."""
     if not PLOTLY_AVAILABLE:
@@ -1201,6 +1220,18 @@ def render_burndown_chart(
     sprint_tasks = [t for t in sprint_tasks if not _is_qa_tester(t.assignee)]
     completed_sprint_tasks = [t for t in completed_sprint_tasks if not _is_qa_tester(t.assignee)]
 
+    # Classify spillover tasks (tagged with current sprint + other sprints)
+    spillover_gids = set()
+    spillover_points = 0
+    if selected_sprint:
+        for t in list(sprint_tasks) + list(completed_sprint_tasks):
+            if t.gid not in spillover_gids and classify_sprint_task(t, selected_sprint) == "spillover":
+                spillover_gids.add(t.gid)
+                try:
+                    spillover_points += float(t.story_points) if t.story_points else 0
+                except (ValueError, TypeError):
+                    pass
+
     # Separate tasks by completion status
     # Tasks in Review, QA, Ready to Ship, or Done are considered "completed" for burndown purposes
     completed_statuses = ("Review", "QA", "Ready to Ship", "Done")
@@ -1212,15 +1243,16 @@ def render_burndown_chart(
     completed_points = 0
     completion_dates = {}  # date -> {points, developers, tasks}
 
-    def _record_completion(date_key, pts, dev_name, task_obj):
-        """Helper to record a completion into completion_dates."""
-        if date_key not in completion_dates:
-            completion_dates[date_key] = {"points": 0, "developers": {}, "tasks": []}
-        completion_dates[date_key]["points"] += pts
-        completion_dates[date_key]["developers"][dev_name] = (
-            completion_dates[date_key]["developers"].get(dev_name, 0) + pts
+    def _record_completion(date_key, pts, dev_name, task_obj, target=None):
+        """Helper to record a completion into a date-keyed dict (default: completion_dates)."""
+        dest = target if target is not None else completion_dates
+        if date_key not in dest:
+            dest[date_key] = {"points": 0, "developers": {}, "tasks": []}
+        dest[date_key]["points"] += pts
+        dest[date_key]["developers"][dev_name] = (
+            dest[date_key]["developers"].get(dev_name, 0) + pts
         )
-        completion_dates[date_key]["tasks"].append(task_obj)
+        dest[date_key]["tasks"].append(task_obj)
 
     # Process active (not done) tasks
     for task in active_tasks:
@@ -1332,6 +1364,50 @@ def render_burndown_chart(
             completion_dates[wd]["developers"][dev] = completion_dates[wd]["developers"].get(dev, 0) + pts
         completion_dates[wd].setdefault("tasks", []).extend(completion_dates[wk].get("tasks", []))
         del completion_dates[wk]
+
+    # Detect carry-in tasks: completed during this sprint window but NOT tagged
+    # with the current sprint.  These represent real work done but invisible in
+    # the main burndown because the task belongs to an older sprint.
+    carry_in_tasks = []
+    carry_in_points = 0
+    carry_in_completion_dates = {}  # date -> {points, developers, tasks}
+    sprint_start_str = sprint_start.strftime("%Y-%m-%d")
+    sprint_end_str = sprint_end.strftime("%Y-%m-%d")
+
+    if selected_sprint and all_results is not None:
+        # Combine unfiltered active + completed to find tasks outside this sprint
+        seen_gids = {t.gid for t in list(sprint_tasks) + list(completed_sprint_tasks)}
+        candidate_pool = list(all_results or []) + list(completed_results or [])
+        for t in candidate_pool:
+            if t.gid in seen_gids:
+                continue
+            if _is_qa_tester(t.assignee):
+                continue
+            # Must not be tagged with current sprint
+            if task_in_sprint(t, selected_sprint):
+                continue
+            # Must have a completion indicator within the sprint window
+            comp_date = None
+            if t.completed_at:
+                comp_date = t.completed_at[:10]
+            elif t.progress in ("Review", "QA", "Ready to Ship", "Done"):
+                status_dt = getattr(t, 'status_changed_at', None)
+                mod_dt = getattr(t, 'modified_at', None)
+                comp_date = status_dt or (mod_dt[:10] if mod_dt else None)
+            if not comp_date:
+                continue
+            if comp_date < sprint_start_str or comp_date > sprint_end_str:
+                continue
+            seen_gids.add(t.gid)
+            try:
+                pts = float(t.story_points) if t.story_points else 0
+            except (ValueError, TypeError):
+                pts = 0
+            carry_in_tasks.append(t)
+            carry_in_points += pts
+            if pts > 0:
+                dev_name = t.assignee or "Unassigned"
+                _record_completion(comp_date, pts, dev_name, t, target=carry_in_completion_dates)
 
     # Generate sprint-day-based series (x-axis = Sprint Day 1, 2, 3, …, 10)
     sprint_day_nums = []
@@ -1471,9 +1547,50 @@ def render_burndown_chart(
 
     st.plotly_chart(fig, use_container_width=True, key="burndown_main")
 
+    # Spillover / carry-in info banners
+    if spillover_gids:
+        spillover_count = len(spillover_gids)
+        st.info(
+            f"**Spillover tasks:** {spillover_count} task(s) worth "
+            f"**{int(spillover_points)} pts** are tagged with multiple sprints. "
+            f"Their points are included in this burndown (matches Asana)."
+        )
+
+    if carry_in_tasks:
+        carry_in_count = len(carry_in_tasks)
+        st.warning(
+            f"**Carry-in tasks:** {carry_in_count} task(s) worth "
+            f"**{int(carry_in_points)} pts** were completed during this sprint "
+            f"but are tagged with an older sprint. These are NOT included in the "
+            f"burndown above."
+        )
+        with st.expander(f"View {carry_in_count} carry-in task(s)"):
+            ci_rows = []
+            for t in carry_in_tasks:
+                try:
+                    pts = float(t.story_points) if t.story_points else 0
+                except (ValueError, TypeError):
+                    pts = 0
+                comp_date = ""
+                if t.completed_at:
+                    comp_date = t.completed_at[:10]
+                elif getattr(t, 'status_changed_at', None):
+                    comp_date = t.status_changed_at  # already YYYY-MM-DD
+                elif getattr(t, 'modified_at', None):
+                    comp_date = t.modified_at[:10]
+                ci_rows.append({
+                    "Task": t.name,
+                    "Assignee": t.assignee or "Unassigned",
+                    "Points": int(pts),
+                    "Sprint Tag": t.sprint or "",
+                    "Status": t.progress or "Completed",
+                    "Completed": comp_date,
+                })
+            st.dataframe(pd.DataFrame(ci_rows), use_container_width=True, hide_index=True)
+
     # Per-developer point breakdown
     all_burndown_tasks = list(sprint_tasks) + list(completed_sprint_tasks)
-    dev_points = {}  # developer -> {total, completed, tasks}
+    dev_points = {}  # developer -> {total, completed, spillover, tasks}
     for t in all_burndown_tasks:
         try:
             pts = float(t.story_points) if t.story_points else 0
@@ -1481,23 +1598,28 @@ def render_burndown_chart(
             pts = 0
         dev = t.assignee or "Unassigned"
         if dev not in dev_points:
-            dev_points[dev] = {"total": 0, "completed": 0, "tasks": []}
+            dev_points[dev] = {"total": 0, "completed": 0, "spillover": 0, "tasks": []}
         dev_points[dev]["total"] += pts
         is_done = (t.progress in completed_statuses) or (t.completed_at is not None)
         if is_done:
             dev_points[dev]["completed"] += pts
+        if t.gid in spillover_gids:
+            dev_points[dev]["spillover"] += pts
         dev_points[dev]["tasks"].append({"name": t.name, "points": pts, "status": t.progress or "Completed"})
 
     with st.expander("Points Breakdown by Developer"):
         breakdown_rows = []
         for dev, data in sorted(dev_points.items(), key=lambda x: x[1]["total"], reverse=True):
-            breakdown_rows.append({
+            row = {
                 "Developer": dev,
                 "Total Pts": int(data["total"]),
                 "Completed Pts": int(data["completed"]),
                 "Remaining Pts": int(data["total"] - data["completed"]),
                 "# Tasks": len(data["tasks"]),
-            })
+            }
+            if spillover_gids:
+                row["Spillover Pts"] = int(data["spillover"])
+            breakdown_rows.append(row)
         if breakdown_rows:
             st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True, hide_index=True)
             st.caption(f"Sprint total: {int(total_points)} pts across {len(dev_points)} developers")
@@ -1511,7 +1633,8 @@ def render_burndown_chart(
             lines = []
             for t in tasks:
                 pts = float(t.story_points) if t.story_points else 0
-                lines.append(f"{t.name} ({t.assignee}, {pts:.0f}pts)")
+                marker = " [SPILLOVER]" if t.gid in spillover_gids else ""
+                lines.append(f"{t.name}{marker} ({t.assignee}, {pts:.0f}pts)")
             completed_detail.append("; ".join(lines))
         else:
             completed_detail.append("")
@@ -1527,6 +1650,11 @@ def render_burndown_chart(
         "pts_per_day": pts_per_day,
         "sprint": sprint,
         "completion_dates": completion_dates,
+        "spillover_gids": spillover_gids,
+        "spillover_points": spillover_points,
+        "carry_in_tasks": carry_in_tasks,
+        "carry_in_points": carry_in_points,
+        "carry_in_completion_dates": carry_in_completion_dates,
     }
 
 
@@ -1575,6 +1703,7 @@ def _extract_pr_links(notes: str | None, comments: list[dict]) -> str:
 def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint_tasks: list | None = None) -> bytes:
     """Generate a rich multi-sheet Excel burndown report.
 
+    Sheet 0 (Overview): Task inventory grouped by status, reconciliation, per-assignee breakdown.
     Sheet 1 (Summary): Burndown chart, stats, and daily summary table.
     Sheets 2-11: One sheet per sprint day with completed task details.
     """
@@ -1645,11 +1774,416 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
             cell.border = thin_border
 
-    # ── Sheet 1: Summary ────────────────────────────────────────────────
-    ws_summary = wb.active
-    ws_summary.title = "Summary"
-
+    # ── Sheet 0: Overview ────────────────────────────────────────────────
     sprint_name = burndown_data["sprint"]
+    spillover_gids = burndown_data.get("spillover_gids", set())
+    spillover_points = burndown_data.get("spillover_points", 0)
+    carry_in_tasks_list = burndown_data.get("carry_in_tasks", [])
+    carry_in_points = burndown_data.get("carry_in_points", 0)
+
+    # -- Classify all sprint tasks by progress status --
+    completed_statuses = ("Review", "QA", "Ready to Ship", "Done")
+    status_buckets: dict[str, list] = {
+        "In Progress": [],
+        "Review": [],
+        "QA": [],
+        "Ready to Ship": [],
+        "Done": [],
+    }
+    # Deduplicate by gid (a task can appear in both active and completed lists)
+    deduped_tasks: list = []
+    if all_sprint_tasks:
+        seen_gids: set[str] = set()
+        for t in all_sprint_tasks:
+            if t.gid in seen_gids:
+                continue
+            seen_gids.add(t.gid)
+            deduped_tasks.append(t)
+
+    for t in deduped_tasks:
+        progress = t.progress or ""
+        if progress in status_buckets:
+            status_buckets[progress].append(t)
+        elif progress:
+            status_buckets.setdefault(progress, []).append(t)
+
+    def _task_pts(task):
+        try:
+            return float(task.story_points) if task.story_points else 0
+        except (ValueError, TypeError):
+            return 0
+
+    # -- Per-assignee aggregation --
+    assignee_data: dict[str, dict] = {}  # name -> {total, completed, remaining, spillover, count}
+    for t in deduped_tasks:
+        name = t.assignee or "Unassigned"
+        pts = _task_pts(t)
+        if name not in assignee_data:
+            assignee_data[name] = {"total": 0, "completed": 0, "remaining": 0, "spillover": 0, "count": 0}
+        assignee_data[name]["total"] += pts
+        assignee_data[name]["count"] += 1
+        if t.progress in completed_statuses:
+            assignee_data[name]["completed"] += pts
+        else:
+            assignee_data[name]["remaining"] += pts
+        if t.gid in spillover_gids:
+            assignee_data[name]["spillover"] += pts
+
+    # -- Spillover task objects (from all_sprint_tasks) --
+    spillover_task_objs = [t for t in (all_sprint_tasks or []) if t.gid in spillover_gids]
+
+    # -- Create the Overview worksheet --
+    ws_overview = wb.active
+    ws_overview.title = "Overview"
+
+    # Section A: Sprint Header
+    ws_overview.cell(row=1, column=1, value=f"Sprint Overview: {sprint_name}").font = title_font
+    ws_overview.merge_cells("A1:G1")
+    ws_overview.cell(row=2, column=1, value=f"Generated: {today_str}").font = subtitle_font
+    ws_overview.merge_cells("A2:G2")
+
+    # Section B: Reconciliation Summary
+    ov_row = 4
+    ws_overview.cell(row=ov_row, column=1, value="Reconciliation Summary").font = subtitle_font
+    ws_overview.merge_cells(start_row=ov_row, start_column=1, end_row=ov_row, end_column=3)
+    ov_row += 1
+
+    recon_headers = ["Category", "# Tasks", "Story Points"]
+    for i, h in enumerate(recon_headers):
+        cell = ws_overview.cell(row=ov_row, column=i + 1, value=h)
+        cell.font = header_font
+        cell.fill = dark_blue_fill
+        cell.alignment = Alignment(horizontal='center')
+        cell.border = thin_border
+    ov_row += 1
+
+    total_tasks = 0
+    total_pts = 0.0
+    for status_name in ("In Progress", "Review", "QA", "Ready to Ship", "Done"):
+        tasks = status_buckets.get(status_name, [])
+        count = len(tasks)
+        pts = sum(_task_pts(t) for t in tasks)
+        total_tasks += count
+        total_pts += pts
+        ws_overview.cell(row=ov_row, column=1, value=status_name).border = thin_border
+        ws_overview.cell(row=ov_row, column=2, value=count).border = thin_border
+        ws_overview.cell(row=ov_row, column=2).alignment = Alignment(horizontal='center')
+        ws_overview.cell(row=ov_row, column=3, value=int(pts)).border = thin_border
+        ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center')
+        # Color code status
+        if status_name in status_fills:
+            ws_overview.cell(row=ov_row, column=1).fill = status_fills[status_name]
+        ov_row += 1
+
+    # Sprint Total row (bold)
+    for col in range(1, 4):
+        ws_overview.cell(row=ov_row, column=col).font = bold_center
+        ws_overview.cell(row=ov_row, column=col).border = thin_border
+        ws_overview.cell(row=ov_row, column=col).alignment = Alignment(horizontal='center')
+    ws_overview.cell(row=ov_row, column=1, value="Sprint Total")
+    ws_overview.cell(row=ov_row, column=2, value=total_tasks)
+    ws_overview.cell(row=ov_row, column=3, value=int(total_pts))
+    ov_row += 1
+
+    # Spillover row
+    ws_overview.cell(row=ov_row, column=1, value="Spillover (multi-sprint)").border = thin_border
+    ws_overview.cell(row=ov_row, column=2, value=len(spillover_task_objs)).border = thin_border
+    ws_overview.cell(row=ov_row, column=2).alignment = Alignment(horizontal='center')
+    ws_overview.cell(row=ov_row, column=3, value=int(spillover_points)).border = thin_border
+    ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center')
+    ov_row += 1
+
+    # Carry-in row
+    ws_overview.cell(row=ov_row, column=1, value="Carry-in (older sprint, done this window)").border = thin_border
+    ws_overview.cell(row=ov_row, column=2, value=len(carry_in_tasks_list)).border = thin_border
+    ws_overview.cell(row=ov_row, column=2).alignment = Alignment(horizontal='center')
+    ws_overview.cell(row=ov_row, column=3, value=int(carry_in_points)).border = thin_border
+    ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center')
+    ov_row += 1
+
+    # Effective Total row (bold)
+    effective_total = total_pts + carry_in_points
+    for col in range(1, 4):
+        ws_overview.cell(row=ov_row, column=col).font = bold_center
+        ws_overview.cell(row=ov_row, column=col).border = thin_border
+        ws_overview.cell(row=ov_row, column=col).alignment = Alignment(horizontal='center')
+    ws_overview.cell(row=ov_row, column=1, value="Effective Total (Sprint + Carry-in)")
+    ws_overview.cell(row=ov_row, column=2, value="")
+    ws_overview.cell(row=ov_row, column=3, value=int(effective_total))
+    ov_row += 2
+
+    # Section C: Points by Assignee
+    ws_overview.cell(row=ov_row, column=1, value="Points by Assignee").font = subtitle_font
+    ws_overview.merge_cells(start_row=ov_row, start_column=1, end_row=ov_row, end_column=6)
+    ov_row += 1
+
+    assignee_headers = ["Assignee", "Total Pts", "Completed Pts", "Remaining Pts", "Spillover Pts", "# Tasks"]
+    for i, h in enumerate(assignee_headers):
+        cell = ws_overview.cell(row=ov_row, column=i + 1, value=h)
+        cell.font = header_font
+        cell.fill = dark_blue_fill
+        cell.alignment = Alignment(horizontal='center')
+        cell.border = thin_border
+    ov_row += 1
+
+    for name in sorted(assignee_data.keys()):
+        data = assignee_data[name]
+        vals = [name, int(data["total"]), int(data["completed"]), int(data["remaining"]), int(data["spillover"]), data["count"]]
+        for i, val in enumerate(vals):
+            cell = ws_overview.cell(row=ov_row, column=i + 1, value=val)
+            cell.border = thin_border
+            if i >= 1:
+                cell.alignment = Alignment(horizontal='center')
+        ov_row += 1
+
+    ov_row += 1
+
+    # Section D: In Progress Task List
+    in_progress_tasks = status_buckets.get("In Progress", [])
+    ip_pts = sum(_task_pts(t) for t in in_progress_tasks)
+    overview_task_headers = ["Task Name", "Assignee", "Story Points", "Type", "Epic", "Sprint Tag", "Asana Link"]
+
+    section_header_fill = PatternFill(start_color="E3F2FD", end_color="E3F2FD", fill_type="solid")
+    ws_overview.cell(
+        row=ov_row, column=1,
+        value=f"IN PROGRESS \u2014 {len(in_progress_tasks)} tasks, {int(ip_pts)} pts"
+    ).font = Font(bold=True, size=12, color="1565C0")
+    ws_overview.merge_cells(start_row=ov_row, start_column=1, end_row=ov_row, end_column=len(overview_task_headers))
+    for col in range(1, len(overview_task_headers) + 1):
+        ws_overview.cell(row=ov_row, column=col).fill = section_header_fill
+    ov_row += 1
+
+    for i, h in enumerate(overview_task_headers):
+        ws_overview.cell(row=ov_row, column=i + 1, value=h)
+    _style_header(ws_overview, ov_row, len(overview_task_headers), dark_blue_fill)
+    ov_row += 1
+
+    for t in sorted(in_progress_tasks, key=lambda x: _task_pts(x), reverse=True):
+        vals = [
+            t.name,
+            t.assignee or "Unassigned",
+            _task_pts(t),
+            t.task_type or "",
+            t.epic or "",
+            t.sprint or "",
+            t.url,
+        ]
+        for i, val in enumerate(vals):
+            cell = ws_overview.cell(row=ov_row, column=i + 1, value=val)
+            cell.border = thin_border
+            cell.alignment = Alignment(vertical='top', wrap_text=True)
+        # Hyperlink for Asana Link column
+        link_cell = ws_overview.cell(row=ov_row, column=len(overview_task_headers))
+        link_cell.hyperlink = t.url
+        link_cell.font = link_font
+        link_cell.value = "Open in Asana"
+        # Bold story points
+        ws_overview.cell(row=ov_row, column=3).font = bold_center
+        ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center', vertical='top')
+        ov_row += 1
+
+    # Subtotal row
+    ws_overview.cell(row=ov_row, column=1, value="Subtotal").font = bold_center
+    ws_overview.cell(row=ov_row, column=3, value=int(ip_pts)).font = bold_center
+    ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center')
+    for col in range(1, len(overview_task_headers) + 1):
+        ws_overview.cell(row=ov_row, column=col).border = thin_border
+    ov_row += 2
+
+    # Section E: Completed Task List (Review + QA + Ready to Ship + Done)
+    completed_tasks_all = []
+    for s in ("Review", "QA", "Ready to Ship", "Done"):
+        completed_tasks_all.extend(status_buckets.get(s, []))
+    comp_pts = sum(_task_pts(t) for t in completed_tasks_all)
+
+    completed_headers = ["Task Name", "Assignee", "Story Points", "Current Status", "Status Changed Date",
+                         "Type", "Epic", "Sprint Tag", "Asana Link"]
+    completed_fill = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
+
+    ws_overview.cell(
+        row=ov_row, column=1,
+        value=f"COMPLETED (Review/QA/Ready to Ship/Done) \u2014 {len(completed_tasks_all)} tasks, {int(comp_pts)} pts"
+    ).font = Font(bold=True, size=12, color="2E7D32")
+    ws_overview.merge_cells(start_row=ov_row, start_column=1, end_row=ov_row, end_column=len(completed_headers))
+    for col in range(1, len(completed_headers) + 1):
+        ws_overview.cell(row=ov_row, column=col).fill = completed_fill
+    ov_row += 1
+
+    for i, h in enumerate(completed_headers):
+        ws_overview.cell(row=ov_row, column=i + 1, value=h)
+    _style_header(ws_overview, ov_row, len(completed_headers), green_fill)
+    ov_row += 1
+
+    for t in sorted(completed_tasks_all, key=lambda x: _task_pts(x), reverse=True):
+        status_date = ""
+        if getattr(t, 'status_changed_at', None):
+            status_date = t.status_changed_at
+        elif t.completed_at:
+            status_date = t.completed_at[:10]
+        vals = [
+            t.name,
+            t.assignee or "Unassigned",
+            _task_pts(t),
+            t.progress or "",
+            status_date,
+            t.task_type or "",
+            t.epic or "",
+            t.sprint or "",
+            t.url,
+        ]
+        for i, val in enumerate(vals):
+            cell = ws_overview.cell(row=ov_row, column=i + 1, value=val)
+            cell.border = thin_border
+            cell.alignment = Alignment(vertical='top', wrap_text=True)
+        # Color code status
+        status = t.progress or ""
+        if status in status_fills:
+            ws_overview.cell(row=ov_row, column=4).fill = status_fills[status]
+        # Hyperlink
+        link_cell = ws_overview.cell(row=ov_row, column=len(completed_headers))
+        link_cell.hyperlink = t.url
+        link_cell.font = link_font
+        link_cell.value = "Open in Asana"
+        # Bold story points
+        ws_overview.cell(row=ov_row, column=3).font = bold_center
+        ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center', vertical='top')
+        ov_row += 1
+
+    # Subtotal row
+    ws_overview.cell(row=ov_row, column=1, value="Subtotal").font = bold_center
+    ws_overview.cell(row=ov_row, column=3, value=int(comp_pts)).font = bold_center
+    ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center')
+    for col in range(1, len(completed_headers) + 1):
+        ws_overview.cell(row=ov_row, column=col).border = thin_border
+    ov_row += 2
+
+    # Section F: Spillover Tasks
+    if spillover_task_objs:
+        sp_pts = sum(_task_pts(t) for t in spillover_task_objs)
+        spillover_fill = PatternFill(start_color="E8EAF6", end_color="E8EAF6", fill_type="solid")
+        spillover_headers = ["Task Name", "Assignee", "Story Points", "Current Status", "Status Changed Date",
+                             "Type", "Epic", "Sprint Tag", "Asana Link"]
+
+        ws_overview.cell(
+            row=ov_row, column=1,
+            value=f"SPILLOVER TASKS \u2014 {len(spillover_task_objs)} tasks, {int(sp_pts)} pts"
+        ).font = Font(bold=True, size=12, color="1565C0")
+        ws_overview.merge_cells(start_row=ov_row, start_column=1, end_row=ov_row, end_column=len(spillover_headers))
+        for col in range(1, len(spillover_headers) + 1):
+            ws_overview.cell(row=ov_row, column=col).fill = spillover_fill
+        ov_row += 1
+
+        for i, h in enumerate(spillover_headers):
+            ws_overview.cell(row=ov_row, column=i + 1, value=h)
+        _style_header(ws_overview, ov_row, len(spillover_headers), PatternFill(start_color="1565C0", end_color="1565C0", fill_type="solid"))
+        ov_row += 1
+
+        for t in sorted(spillover_task_objs, key=lambda x: _task_pts(x), reverse=True):
+            status_date = ""
+            if getattr(t, 'status_changed_at', None):
+                status_date = t.status_changed_at
+            elif t.completed_at:
+                status_date = t.completed_at[:10]
+            vals = [
+                t.name,
+                t.assignee or "Unassigned",
+                _task_pts(t),
+                t.progress or "",
+                status_date,
+                t.task_type or "",
+                t.epic or "",
+                t.sprint or "",
+                t.url,
+            ]
+            for i, val in enumerate(vals):
+                cell = ws_overview.cell(row=ov_row, column=i + 1, value=val)
+                cell.border = thin_border
+                cell.alignment = Alignment(vertical='top', wrap_text=True)
+            status = t.progress or ""
+            if status in status_fills:
+                ws_overview.cell(row=ov_row, column=4).fill = status_fills[status]
+            link_cell = ws_overview.cell(row=ov_row, column=len(spillover_headers))
+            link_cell.hyperlink = t.url
+            link_cell.font = link_font
+            link_cell.value = "Open in Asana"
+            ws_overview.cell(row=ov_row, column=3).font = bold_center
+            ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center', vertical='top')
+            ov_row += 1
+
+        # Subtotal
+        ws_overview.cell(row=ov_row, column=1, value="Subtotal").font = bold_center
+        ws_overview.cell(row=ov_row, column=3, value=int(sp_pts)).font = bold_center
+        ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center')
+        for col in range(1, len(spillover_headers) + 1):
+            ws_overview.cell(row=ov_row, column=col).border = thin_border
+        ov_row += 2
+
+    # Section G: Carry-in Tasks
+    if carry_in_tasks_list:
+        ci_pts = sum(_task_pts(t) for t in carry_in_tasks_list)
+        carryin_fill = PatternFill(start_color="FFF3E0", end_color="FFF3E0", fill_type="solid")
+        carryin_headers = ["Task Name", "Assignee", "Story Points", "Current Status", "Status Changed Date",
+                           "Type", "Epic", "Sprint Tag", "Asana Link"]
+
+        ws_overview.cell(
+            row=ov_row, column=1,
+            value=f"CARRY-IN TASKS \u2014 {len(carry_in_tasks_list)} tasks, {int(ci_pts)} pts"
+        ).font = Font(bold=True, size=12, color="E65100")
+        ws_overview.merge_cells(start_row=ov_row, start_column=1, end_row=ov_row, end_column=len(carryin_headers))
+        for col in range(1, len(carryin_headers) + 1):
+            ws_overview.cell(row=ov_row, column=col).fill = carryin_fill
+        ov_row += 1
+
+        for i, h in enumerate(carryin_headers):
+            ws_overview.cell(row=ov_row, column=i + 1, value=h)
+        _style_header(ws_overview, ov_row, len(carryin_headers), PatternFill(start_color="E65100", end_color="E65100", fill_type="solid"))
+        ov_row += 1
+
+        for t in sorted(carry_in_tasks_list, key=lambda x: _task_pts(x), reverse=True):
+            status_date = ""
+            if getattr(t, 'status_changed_at', None):
+                status_date = t.status_changed_at
+            elif t.completed_at:
+                status_date = t.completed_at[:10]
+            vals = [
+                t.name,
+                t.assignee or "Unassigned",
+                _task_pts(t),
+                t.progress or "Completed",
+                status_date,
+                t.task_type or "",
+                t.epic or "",
+                t.sprint or "",
+                t.url,
+            ]
+            for i, val in enumerate(vals):
+                cell = ws_overview.cell(row=ov_row, column=i + 1, value=val)
+                cell.border = thin_border
+                cell.alignment = Alignment(vertical='top', wrap_text=True)
+            status = t.progress or ""
+            if status in status_fills:
+                ws_overview.cell(row=ov_row, column=4).fill = status_fills[status]
+            link_cell = ws_overview.cell(row=ov_row, column=len(carryin_headers))
+            link_cell.hyperlink = t.url
+            link_cell.font = link_font
+            link_cell.value = "Open in Asana"
+            ws_overview.cell(row=ov_row, column=3).font = bold_center
+            ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center', vertical='top')
+            ov_row += 1
+
+        # Subtotal
+        ws_overview.cell(row=ov_row, column=1, value="Subtotal").font = bold_center
+        ws_overview.cell(row=ov_row, column=3, value=int(ci_pts)).font = bold_center
+        ws_overview.cell(row=ov_row, column=3).alignment = Alignment(horizontal='center')
+        for col in range(1, len(carryin_headers) + 1):
+            ws_overview.cell(row=ov_row, column=col).border = thin_border
+
+    _auto_width(ws_overview)
+    ws_overview.freeze_panes = "A6"  # Freeze through reconciliation column headers
+
+    # ── Sheet 1: Summary ────────────────────────────────────────────────
+    ws_summary = wb.create_sheet(title="Summary")
+
     ws_summary.cell(row=1, column=1, value=f"Sprint Burndown: {sprint_name}").font = title_font
     ws_summary.cell(row=2, column=1, value=f"Generated: {today_str}").font = subtitle_font
     ws_summary.merge_cells("A1:F1")
@@ -1727,6 +2261,68 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
     chart_row = data_end_row + 2
     ws_summary.add_chart(chart, f"A{chart_row}")
 
+    # Spillover & carry-in summary section below the chart
+    # (spillover_gids, spillover_points, carry_in_tasks_list, carry_in_points
+    #  are already extracted in the Overview sheet section above)
+
+    # Place this section ~16 rows below chart_row (chart occupies ~14 rows)
+    sci_row = chart_row + 16
+
+    if spillover_gids or carry_in_tasks_list:
+        ws_summary.cell(row=sci_row, column=1, value="Spillover & Carry-in Summary").font = subtitle_font
+        ws_summary.merge_cells(start_row=sci_row, start_column=1, end_row=sci_row, end_column=5)
+        sci_row += 1
+
+        if spillover_gids:
+            ws_summary.cell(
+                row=sci_row, column=1,
+                value=f"Spillover tasks (multi-sprint tagged): {len(spillover_gids)} tasks, {int(spillover_points)} pts"
+            ).font = Font(size=11, color="1565C0")
+            sci_row += 1
+
+        if carry_in_tasks_list:
+            ws_summary.cell(
+                row=sci_row, column=1,
+                value=f"Carry-in tasks (older sprint, completed this window): {len(carry_in_tasks_list)} tasks, {int(carry_in_points)} pts"
+            ).font = Font(size=11, color="E65100")
+            sci_row += 2
+
+            # Carry-in detail table
+            ci_headers = ["Task", "Assignee", "Points", "Sprint Tag", "Status", "Completed"]
+            for i, h in enumerate(ci_headers):
+                cell = ws_summary.cell(row=sci_row, column=i + 1, value=h)
+                cell.font = header_font
+                cell.fill = PatternFill(start_color="E65100", end_color="E65100", fill_type="solid")
+                cell.alignment = Alignment(horizontal='center')
+                cell.border = thin_border
+            sci_row += 1
+
+            for t in carry_in_tasks_list:
+                try:
+                    pts = float(t.story_points) if t.story_points else 0
+                except (ValueError, TypeError):
+                    pts = 0
+                comp_date = ""
+                if t.completed_at:
+                    comp_date = t.completed_at[:10]
+                elif getattr(t, 'status_changed_at', None):
+                    comp_date = t.status_changed_at  # already YYYY-MM-DD
+                elif getattr(t, 'modified_at', None):
+                    comp_date = t.modified_at[:10]
+                ci_vals = [
+                    t.name,
+                    t.assignee or "Unassigned",
+                    pts,
+                    t.sprint or "",
+                    t.progress or "Completed",
+                    comp_date,
+                ]
+                for i, val in enumerate(ci_vals):
+                    cell = ws_summary.cell(row=sci_row, column=i + 1, value=val)
+                    cell.border = thin_border
+                    cell.alignment = Alignment(wrap_text=True)
+                sci_row += 1
+
     _auto_width(ws_summary)
     ws_summary.freeze_panes = "A8"
 
@@ -1755,7 +2351,7 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
         "Status Changed", "GitHub PR", "Comments",
     ]
 
-    def _write_task_row(ws, row, task_obj, greyed_out=False):
+    def _write_task_row(ws, row, task_obj, greyed_out=False, is_spillover=False):
         """Write a single task row. When greyed_out=True, use muted styles for due tasks."""
         # Fetch comments and extract PR links
         task_comments = []
@@ -1783,8 +2379,9 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
 
         pts = float(task_obj.story_points) if task_obj.story_points else 0
 
+        task_display_name = f"[SPILLOVER] {task_obj.name}" if is_spillover else task_obj.name
         values = [
-            task_obj.name,                              # Task Name
+            task_display_name,                          # Task Name
             task_obj.url,                               # Asana Link
             task_obj.assignee or "Unassigned",          # Assignee
             task_obj.qa_assignee or "",                 # QA Assignee
@@ -1887,7 +2484,8 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
 
         # Write completed tasks (normal styling)
         for task_obj in completed_tasks:
-            _write_task_row(ws, current_row, task_obj, greyed_out=False)
+            _write_task_row(ws, current_row, task_obj, greyed_out=False,
+                            is_spillover=task_obj.gid in spillover_gids)
             current_row += 1
 
         # Separator row if both groups exist
@@ -1899,7 +2497,8 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
 
         # Write due tasks (greyed out)
         for task_obj in due_tasks:
-            _write_task_row(ws, current_row, task_obj, greyed_out=True)
+            _write_task_row(ws, current_row, task_obj, greyed_out=True,
+                            is_spillover=task_obj.gid in spillover_gids)
             current_row += 1
 
         _auto_width(ws)
@@ -3527,7 +4126,8 @@ def main():
         # Burndown chart
         burndown_data = render_burndown_chart(
             filtered_results, completed_results, filters.get("sprint"),
-            target_sprint_points=target_sprint_points if target_sprint_points > 0 else None
+            target_sprint_points=target_sprint_points if target_sprint_points > 0 else None,
+            all_results=results,
         )
 
     with col_assignee:
@@ -3587,6 +4187,21 @@ def main():
         stat_cols[0].metric("Total Story Points", f"{bd['ideal_total']:.0f}")
         stat_cols[1].metric("# Days in Sprint", bd["sprint_days"])
         stat_cols[2].metric("Points to Complete / Day", f"{bd['pts_per_day']:.1f}")
+
+        # Carry-in / spillover metrics row
+        ci_tasks = bd.get("carry_in_tasks", [])
+        ci_points = bd.get("carry_in_points", 0)
+        sp_gids = bd.get("spillover_gids", set())
+        sp_points = bd.get("spillover_points", 0)
+        if ci_tasks or sp_gids:
+            ci_cols = st.columns(3)
+            if sp_gids:
+                ci_cols[0].metric("Spillover Tasks", f"{len(sp_gids)} ({int(sp_points)} pts)")
+            if ci_tasks:
+                ci_cols[1].metric("Carry-in Tasks", f"{len(ci_tasks)} ({int(ci_points)} pts)")
+            if ci_tasks:
+                effective = bd['ideal_total'] + ci_points
+                ci_cols[2].metric("Effective Work (Sprint + Carry-in)", f"{int(effective)} pts")
 
         # Download burndown data (rich multi-sheet Excel report)
         col_dl1, col_dl2, col_dl3 = st.columns([2, 1, 2])
