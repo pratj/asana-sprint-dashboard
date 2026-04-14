@@ -1317,7 +1317,9 @@ def render_burndown_chart(
     try:
         anchor = datetime.strptime(anchor_str, "%Y-%m-%d")
         days_since_anchor = (today - anchor).days
-        current_sprint_offset = (days_since_anchor // 14) * 14
+        # On the exact 14-day boundary, today is the last day of the ending
+        # sprint, not Day 1 of the next one.
+        current_sprint_offset = (max(0, days_since_anchor - 1) // 14) * 14
         sprint_start = (anchor + timedelta(days=current_sprint_offset)).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
