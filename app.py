@@ -672,44 +672,16 @@ st.markdown("""
     .nm-activity-event {
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 8px 14px;
-        margin-bottom: 6px;
-        border-radius: 10px;
+        gap: 8px;
+        padding: 7px 14px;
+        margin-bottom: 4px;
+        border-radius: 8px;
         background: var(--nm-bg);
-        box-shadow: 2px 2px 5px #A3B1C6, -2px -2px 5px #FFFFFF;
-        font-size: 0.88rem;
+        box-shadow: 2px 2px 4px #A3B1C6, -2px -2px 4px #FFFFFF;
+        font-size: 0.86rem;
         color: var(--nm-text-primary);
     }
-    .nm-activity-event a {
-        color: var(--nm-primary);
-        text-decoration: none;
-        font-weight: 500;
-    }
     .nm-activity-event a:hover { text-decoration: underline; }
-    .nm-activity-badge {
-        display: inline-block;
-        padding: 2px 10px;
-        border-radius: 6px;
-        font-size: 0.75rem;
-        font-weight: 600;
-        white-space: nowrap;
-    }
-    .nm-activity-badge--completion { background: rgba(91,154,139,0.2); color: #3D7A6B; }
-    .nm-activity-badge--carry-in   { background: rgba(168,130,90,0.2); color: #8B6A3C; }
-    .nm-activity-badge--created    { background: rgba(107,127,215,0.2); color: #4A5FA0; }
-    .nm-activity-badge--comment    { background: rgba(90,154,168,0.2); color: #3D7A8A; }
-    .nm-activity-badge--due        { background: rgba(212,165,116,0.2); color: #8B6A3C; }
-    .nm-activity-pts {
-        margin-left: auto;
-        font-weight: 600;
-        color: var(--nm-text-secondary);
-        font-size: 0.82rem;
-    }
-    .nm-activity-assignee {
-        color: var(--nm-text-secondary);
-        font-size: 0.82rem;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -3064,6 +3036,9 @@ def render_bug_count_chart(
 # Sprint Activity Timeline
 # =============================================================================
 
+import html as _html_mod  # for escaping task names in HTML output
+
+
 def _build_sprint_activities(
     all_tasks: list,
     sprint_dates: list[str],
@@ -3086,7 +3061,6 @@ def _build_sprint_activities(
         while dt.weekday() >= 5:
             dt += timedelta(days=1)
         snapped = dt.strftime("%Y-%m-%d")
-        # Only return if it falls within the sprint window
         if snapped in sprint_date_set:
             return snapped
         return None
@@ -3114,9 +3088,7 @@ def _build_sprint_activities(
                 "url": task.url,
                 "assignee": task.assignee or "Unassigned",
                 "points": _safe_pts(task),
-                "badge_class": "completion",
-                "badge_label": "Completed",
-                "icon": "\u2705",
+                "status": task.progress or "Done",
             })
 
     # 2. Carry-in completions
@@ -3129,9 +3101,7 @@ def _build_sprint_activities(
                 "url": task.url,
                 "assignee": task.assignee or "Unassigned",
                 "points": _safe_pts(task),
-                "badge_class": "carry-in",
-                "badge_label": "Carry-in",
-                "icon": "\U0001f4e5",
+                "status": task.progress or "Done",
             })
 
     # 3. Scan all tasks for created, comment, and due events
@@ -3149,9 +3119,7 @@ def _build_sprint_activities(
                         "url": task.url,
                         "assignee": task.assignee or "Unassigned",
                         "points": _safe_pts(task),
-                        "badge_class": "created",
-                        "badge_label": "Created",
-                        "icon": "\u2795",
+                        "status": task.progress or "To Do",
                     })
 
         # Comment during sprint (last_comment_date only — one per task)
@@ -3160,17 +3128,14 @@ def _build_sprint_activities(
             if sprint_start_str <= comment_date <= sprint_end_str:
                 snap = _snap_to_working_day(comment_date)
                 if snap:
-                    author = task.last_comment_author or ""
                     _add_event(snap, {
                         "type": "comment",
                         "gid": task.gid,
                         "name": task.name,
                         "url": task.url,
-                        "assignee": author if author else (task.assignee or "Unassigned"),
+                        "assignee": task.last_comment_author or task.assignee or "Unassigned",
                         "points": 0,
-                        "badge_class": "comment",
-                        "badge_label": "Comment",
-                        "icon": "\U0001f4ac",
+                        "status": task.progress or "",
                     })
 
         # Due date falls in sprint
@@ -3185,12 +3150,10 @@ def _build_sprint_activities(
                         "url": task.url,
                         "assignee": task.assignee or "Unassigned",
                         "points": _safe_pts(task),
-                        "badge_class": "due",
-                        "badge_label": "Due",
-                        "icon": "\U0001f4c5",
+                        "status": task.progress or "",
                     })
 
-    # Sort events within each day: completions first, then carry-in, created, comment, due
+    # Sort: completions first, then carry-in, created, comment, due
     type_order = {"completion": 0, "carry_in": 1, "created": 2, "comment": 3, "due": 4}
     for date_str in activities:
         activities[date_str].sort(key=lambda e: type_order.get(e["type"], 99))
@@ -3198,48 +3161,109 @@ def _build_sprint_activities(
     return activities
 
 
-def _build_day_summary(events: list) -> str:
-    """Return a compact one-line summary of a day's events."""
+_STATUS_COLORS = {
+    "Backlog": "#9E9E9E",
+    "To Do": "#7986CB",
+    "In Progress": "#4FC3F7",
+    "Review": "#FFB74D",
+    "QA": "#CE93D8",
+    "Ready to Ship": "#81C784",
+    "Done": "#4CAF50",
+}
+
+_EVENT_CONFIG = {
+    "completion": {"icon": "\u2705", "label": "Moved to", "color": "#3D7A6B"},
+    "carry_in": {"icon": "\U0001f4e5", "label": "Carry-in \u2192", "color": "#8B6A3C"},
+    "created": {"icon": "\u2795", "label": "Created in", "color": "#4A5FA0"},
+    "comment": {"icon": "\U0001f4ac", "label": "Comment", "color": "#3D7A8A"},
+    "due": {"icon": "\U0001f4c5", "label": "Due", "color": "#8B6A3C"},
+}
+
+
+def _render_sprint_day_content(events: list, remaining_pts, ideal_pts):
+    """Render a single sprint day's activity inside an expander."""
+
+    # Remaining points metric row
+    remaining_str = f"{int(remaining_pts)} pts" if remaining_pts is not None else "—"
+    ideal_str = f"{int(ideal_pts)} pts" if ideal_pts is not None else "—"
+    delta = ""
+    if remaining_pts is not None and ideal_pts is not None:
+        diff = remaining_pts - ideal_pts
+        if diff > 0:
+            delta = f'<span style="color:#E57373;font-weight:600">+{int(diff)} behind</span>'
+        elif diff < 0:
+            delta = f'<span style="color:#81C784;font-weight:600">{int(abs(diff))} ahead</span>'
+        else:
+            delta = '<span style="color:#81C784;font-weight:600">On track</span>'
+
+    metric_html = f"""<div style="display:flex;gap:24px;align-items:center;padding:8px 14px;margin-bottom:12px;
+        border-radius:10px;background:linear-gradient(135deg,#E8EDF2,#F0F4F8);
+        box-shadow:inset 2px 2px 4px #C8D0D8,inset -2px -2px 4px #FFFFFF;">
+        <div><span style="font-size:0.78rem;color:#6B7B8D">Remaining</span><br>
+            <span style="font-size:1.1rem;font-weight:700;color:#2C3E50">{remaining_str}</span></div>
+        <div><span style="font-size:0.78rem;color:#6B7B8D">Ideal</span><br>
+            <span style="font-size:1.1rem;font-weight:600;color:#6B7B8D">{ideal_str}</span></div>
+        <div>{delta}</div>
+    </div>"""
+    st.markdown(metric_html, unsafe_allow_html=True)
+
     if not events:
-        return "No activity"
-    counts: dict[str, int] = {}
-    total_pts = 0
+        st.caption("No task activity recorded for this day.")
+        return
+
+    # Group events by type for clean sections
+    groups: dict[str, list] = {}
     for e in events:
-        counts[e["type"]] = counts.get(e["type"], 0) + 1
-        if e["type"] in ("completion", "carry_in"):
-            total_pts += e["points"]
+        groups.setdefault(e["type"], []).append(e)
 
-    parts = []
-    comp = counts.get("completion", 0) + counts.get("carry_in", 0)
-    if comp:
-        pts_str = f" ({int(total_pts)} pts)" if total_pts else ""
-        parts.append(f"{comp} completed{pts_str}")
-    if counts.get("created"):
-        parts.append(f"{counts['created']} created")
-    if counts.get("comment"):
-        parts.append(f"{counts['comment']} comments")
-    if counts.get("due"):
-        parts.append(f"{counts['due']} due")
-    return ", ".join(parts) if parts else "No activity"
+    # Render each group
+    for etype in ("completion", "carry_in", "created", "comment", "due"):
+        group = groups.get(etype)
+        if not group:
+            continue
 
+        cfg = _EVENT_CONFIG[etype]
+        rows_html = []
+        for e in group:
+            name_escaped = _html_mod.escape(e["name"])
+            link = f'<a href="{e["url"]}" target="_blank" style="color:#4A6FA5;text-decoration:none;font-weight:500">{name_escaped}</a>' if e.get("url") else name_escaped
 
-def _render_day_events(events: list):
-    """Render activity events as styled HTML rows inside a Streamlit expander."""
-    for e in events:
-        pts_html = ""
-        if e["points"] and e["type"] in ("completion", "carry_in", "due", "created"):
-            pts_html = f'<span class="nm-activity-pts">{int(e["points"])} pts</span>'
+            # Status badge
+            status = e.get("status", "")
+            status_color = _STATUS_COLORS.get(status, "#9E9E9E")
+            status_badge = ""
+            if status and etype != "comment":
+                status_badge = (
+                    f'<span style="display:inline-block;padding:1px 8px;border-radius:4px;'
+                    f'font-size:0.72rem;font-weight:600;color:#fff;background:{status_color}">'
+                    f'{_html_mod.escape(status)}</span>'
+                )
 
-        link = f'<a href="{e["url"]}" target="_blank">{e["name"]}</a>' if e.get("url") else e["name"]
+            # Points
+            pts_html = ""
+            if e["points"] and etype in ("completion", "carry_in", "due", "created"):
+                pts_html = f'<span style="margin-left:auto;font-weight:600;color:#6B7B8D;font-size:0.82rem;white-space:nowrap">{int(e["points"])} pts</span>'
 
-        html = f"""<div class="nm-activity-event">
-            <span>{e["icon"]}</span>
-            <span class="nm-activity-badge nm-activity-badge--{e["badge_class"]}">{e["badge_label"]}</span>
-            <span>{link}</span>
-            <span class="nm-activity-assignee">{e["assignee"]}</span>
-            {pts_html}
-        </div>"""
-        st.markdown(html, unsafe_allow_html=True)
+            assignee_html = f'<span style="color:#6B7B8D;font-size:0.82rem;white-space:nowrap">{_html_mod.escape(e["assignee"])}</span>'
+
+            rows_html.append(
+                f'<div class="nm-activity-event">'
+                f'<span>{link}</span>&nbsp;{status_badge}&nbsp;{assignee_html}{pts_html}'
+                f'</div>'
+            )
+
+        # Section header
+        event_label = cfg["label"]
+        if etype in ("completion", "carry_in"):
+            total_pts = sum(e["points"] for e in group)
+            event_label = f"{cfg['label']} ({int(total_pts)} pts)" if total_pts else cfg["label"]
+        section_header = (
+            f'<div style="display:flex;align-items:center;gap:6px;margin:10px 0 4px 0;'
+            f'font-size:0.82rem;font-weight:600;color:{cfg["color"]}">'
+            f'{cfg["icon"]} {event_label} &mdash; {len(group)} task{"s" if len(group) != 1 else ""}</div>'
+        )
+
+        st.markdown(section_header + "\n".join(rows_html), unsafe_allow_html=True)
 
 
 def render_sprint_activity(
@@ -3254,6 +3278,8 @@ def render_sprint_activity(
 
     sprint_day_nums = burndown_data.get("sprint_day_nums", [])
     real_dates = burndown_data.get("real_dates", [])
+    actual_line = burndown_data.get("actual_line", [])
+    ideal_line = burndown_data.get("ideal_line", [])
     completion_dates = burndown_data.get("completion_dates", {})
     carry_in_completion_dates = burndown_data.get("carry_in_completion_dates", {})
 
@@ -3274,22 +3300,33 @@ def render_sprint_activity(
     st.subheader("Sprint Activity")
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    for day_num, date_str in zip(sprint_day_nums, real_dates):
+    for idx, (day_num, date_str) in enumerate(zip(sprint_day_nums, real_dates)):
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         day_label = f"Day {day_num} ({_ordinal(dt.day)} {dt.strftime('%b')})"
+        is_today = (date_str == today_str)
 
         events = activities.get(date_str, [])
-        summary = _build_day_summary(events)
-        is_today = (date_str == today_str)
+        remaining = actual_line[idx] if idx < len(actual_line) else None
+        ideal = ideal_line[idx] if idx < len(ideal_line) else None
+
+        # Build summary for expander label
+        parts = []
+        if remaining is not None:
+            parts.append(f"{int(remaining)} pts remaining")
+        comp_events = [e for e in events if e["type"] in ("completion", "carry_in")]
+        if comp_events:
+            comp_pts = sum(e["points"] for e in comp_events)
+            parts.append(f"{len(comp_events)} completed ({int(comp_pts)} pts)")
+        other = len(events) - len(comp_events)
+        if other:
+            parts.append(f"{other} other")
+        summary = " | ".join(parts) if parts else "No activity"
 
         icon = "\U0001f539" if is_today else ""
         label = f"{icon} {day_label} \u2014 {summary}" if icon else f"{day_label} \u2014 {summary}"
 
         with st.expander(label, expanded=is_today):
-            if not events:
-                st.caption("No activity recorded for this day.")
-            else:
-                _render_day_events(events)
+            _render_sprint_day_content(events, remaining, ideal)
 
 
 # =============================================================================
