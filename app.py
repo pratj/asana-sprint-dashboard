@@ -941,7 +941,7 @@ def render_dashboard_filters(
     """Render filter controls on the dashboard (horizontal layout)."""
     st.subheader("Filters")
 
-    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         # Sprint filter - combine active and completed tasks to get all sprints with data
@@ -980,13 +980,6 @@ def render_dashboard_filters(
             help="Filter by status (empty = all)",
             key="filter_statuses"
         )
-
-    with col4:
-        st.write("")  # Spacing
-        st.write("")  # Align with other fields
-        if st.button("Refresh Data", type="secondary", use_container_width=True):
-            st.session_state["report_generated"] = False
-            st.rerun()
 
     # Completion Analytics Date Range Filter
     st.subheader("Completion Date Range")
