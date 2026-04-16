@@ -1438,6 +1438,14 @@ def render_burndown_chart(
     ideal_line = []
     actual_line = []
     hover_texts = []
+    tick_labels = []
+
+    def _ordinal(n):
+        if 11 <= (n % 100) <= 13:
+            suffix = 'th'
+        else:
+            suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
+        return f"{n}{suffix}"
 
     ideal_total = target_sprint_points if target_sprint_points else total_points
     daily_decrement = ideal_total / sprint_days
@@ -1448,6 +1456,7 @@ def render_burndown_chart(
         sprint_day = day_num + 1
         sprint_day_nums.append(sprint_day)
         real_dates.append(date_str)
+        tick_labels.append(f"Day {sprint_day}<br>{_ordinal(working_date.day)}")
 
         # Ideal burndown (uses target if set, otherwise total from tasks)
         ideal_remaining = max(0, ideal_total - (daily_decrement * day_num))
@@ -1545,18 +1554,18 @@ def render_burndown_chart(
             text=f"Sprint Burndown: {sprint}, {start_label} - {end_label}",
             font=dict(size=20, color=nm_text_primary)
         ),
-        xaxis_title="Sprint Day",
         yaxis_title="Story Points Remaining",
         hovermode="x unified",
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=450,
-        margin=dict(t=80),
+        margin=dict(t=80, b=80),
         paper_bgcolor=nm_bg,
         plot_bgcolor=nm_bg,
         font=dict(color=nm_text_primary),
         xaxis=dict(
-            dtick=1,
+            tickvals=sprint_day_nums,
+            ticktext=tick_labels,
             gridcolor='rgba(163, 177, 198, 0.3)',
             linecolor='rgba(163, 177, 198, 0.5)',
             tickcolor='rgba(163, 177, 198, 0.5)',
@@ -1567,6 +1576,21 @@ def render_burndown_chart(
             tickcolor='rgba(163, 177, 198, 0.5)',
         ),
     )
+
+    # Add month label(s) above the x-axis (a sprint can span two months)
+    month_groups = {}
+    for day_num, wd in zip(sprint_day_nums, sprint_working_dates):
+        month_name = wd.strftime("%B")
+        month_groups.setdefault(month_name, []).append(day_num)
+    for month_name, day_nums in month_groups.items():
+        center_x = (day_nums[0] + day_nums[-1]) / 2
+        fig.add_annotation(
+            x=center_x, y=-0.18,
+            xref="x", yref="paper",
+            text=f"<b>{month_name}</b>",
+            showarrow=False,
+            font=dict(size=12, color=nm_text_primary),
+        )
 
     st.plotly_chart(fig, use_container_width=True, key="burndown_main")
 
