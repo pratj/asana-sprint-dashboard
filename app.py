@@ -1744,7 +1744,7 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.chart import LineChart, Reference
-    from openpyxl.utils import get_column_letter
+    from openpyxl.utils import get_column_letter  # noqa: F401 — used by openpyxl internals
 
     wb = Workbook()
     today_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -2045,7 +2045,7 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
 
     completed_headers = ["Task Name", "Assignee", "Story Points", "Current Status", "Status Changed Date",
                          "Type", "Epic", "Sprint Tag", "Asana Link"]
-    completed_fill = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
+
 
     ws_overview.cell(
         row=ov_row, column=1,
@@ -2364,7 +2364,10 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
         except Exception as e:
             pass  # Comments are optional; skip silently on API errors
 
-        pts = float(task_obj.story_points) if task_obj.story_points else 0
+        try:
+            pts = float(task_obj.story_points) if task_obj.story_points else 0
+        except (ValueError, TypeError):
+            pts = 0
 
         task_display_name = f"[SPILLOVER] {task_obj.name}" if is_spillover else task_obj.name
         values = [
@@ -2462,7 +2465,6 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
             continue
 
         # Column headers at row 3
-        _style_header(ws, 3, len(day_columns), dark_blue_fill)
         for i, h in enumerate(day_columns):
             ws.cell(row=3, column=i + 1, value=h)
         _style_header(ws, 3, len(day_columns), dark_blue_fill)
