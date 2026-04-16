@@ -3180,12 +3180,44 @@ _EVENT_CONFIG = {
 }
 
 
-def _render_sprint_day_content(events: list, remaining_pts, ideal_pts):
+def _render_task_row(task_name, task_url, status, assignee, points):
+    """Build HTML for a single task row."""
+    name_escaped = _html_mod.escape(task_name)
+    link = (f'<a href="{task_url}" target="_blank" style="color:#4A6FA5;'
+            f'text-decoration:none;font-weight:500">{name_escaped}</a>'
+            if task_url else name_escaped)
+    status_color = _STATUS_COLORS.get(status, "#9E9E9E")
+    status_badge = ""
+    if status:
+        status_badge = (
+            f'<span style="display:inline-block;padding:1px 8px;border-radius:4px;'
+            f'font-size:0.72rem;font-weight:600;color:#fff;background:{status_color}">'
+            f'{_html_mod.escape(status)}</span>')
+    pts_html = ""
+    if points:
+        pts_html = (f'<span style="margin-left:auto;font-weight:600;color:#6B7B8D;'
+                    f'font-size:0.82rem;white-space:nowrap">{int(points)} pts</span>')
+    assignee_html = (f'<span style="color:#6B7B8D;font-size:0.82rem;white-space:nowrap">'
+                     f'{_html_mod.escape(assignee)}</span>')
+    return (f'<div class="nm-activity-event">'
+            f'<span>{link}</span>&nbsp;{status_badge}&nbsp;{assignee_html}{pts_html}</div>')
+
+
+def _render_section_header(icon, label, count, color):
+    """Build HTML for a section header."""
+    plural = "s" if count != 1 else ""
+    return (f'<div style="display:flex;align-items:center;gap:6px;margin:10px 0 4px 0;'
+            f'font-size:0.82rem;font-weight:600;color:{color}">'
+            f'{icon} {label} &mdash; {count} task{plural}</div>')
+
+
+def _render_sprint_day_content(events, remaining_pts, ideal_pts,
+                               remaining_tasks, is_last_day):
     """Render a single sprint day's activity inside an expander."""
 
     # Remaining points metric row
-    remaining_str = f"{int(remaining_pts)} pts" if remaining_pts is not None else "—"
-    ideal_str = f"{int(ideal_pts)} pts" if ideal_pts is not None else "—"
+    remaining_str = f"{int(remaining_pts)} pts" if remaining_pts is not None else "\u2014"
+    ideal_str = f"{int(ideal_pts)} pts" if ideal_pts is not None else "\u2014"
     delta = ""
     if remaining_pts is not None and ideal_pts is not None:
         diff = remaining_pts - ideal_pts
@@ -3196,74 +3228,84 @@ def _render_sprint_day_content(events: list, remaining_pts, ideal_pts):
         else:
             delta = '<span style="color:#81C784;font-weight:600">On track</span>'
 
-    metric_html = f"""<div style="display:flex;gap:24px;align-items:center;padding:8px 14px;margin-bottom:12px;
-        border-radius:10px;background:linear-gradient(135deg,#E8EDF2,#F0F4F8);
-        box-shadow:inset 2px 2px 4px #C8D0D8,inset -2px -2px 4px #FFFFFF;">
-        <div><span style="font-size:0.78rem;color:#6B7B8D">Remaining</span><br>
-            <span style="font-size:1.1rem;font-weight:700;color:#2C3E50">{remaining_str}</span></div>
-        <div><span style="font-size:0.78rem;color:#6B7B8D">Ideal</span><br>
-            <span style="font-size:1.1rem;font-weight:600;color:#6B7B8D">{ideal_str}</span></div>
-        <div>{delta}</div>
-    </div>"""
+    n_remaining = len(remaining_tasks)
+    remaining_count_html = (
+        f'<div style="margin-left:auto"><span style="font-size:0.78rem;color:#6B7B8D">Tasks Left</span><br>'
+        f'<span style="font-size:1.1rem;font-weight:700;color:#2C3E50">{n_remaining}</span></div>'
+    )
+
+    metric_html = (
+        f'<div style="display:flex;gap:24px;align-items:center;padding:8px 14px;margin-bottom:12px;'
+        f'border-radius:10px;background:linear-gradient(135deg,#E8EDF2,#F0F4F8);'
+        f'box-shadow:inset 2px 2px 4px #C8D0D8,inset -2px -2px 4px #FFFFFF;">'
+        f'<div><span style="font-size:0.78rem;color:#6B7B8D">Remaining</span><br>'
+        f'<span style="font-size:1.1rem;font-weight:700;color:#2C3E50">{remaining_str}</span></div>'
+        f'<div><span style="font-size:0.78rem;color:#6B7B8D">Ideal</span><br>'
+        f'<span style="font-size:1.1rem;font-weight:600;color:#6B7B8D">{ideal_str}</span></div>'
+        f'<div>{delta}</div>'
+        f'{remaining_count_html}'
+        f'</div>'
+    )
     st.markdown(metric_html, unsafe_allow_html=True)
 
-    if not events:
+    # --- Activity events grouped by type ---
+    if events:
+        groups: dict[str, list] = {}
+        for e in events:
+            groups.setdefault(e["type"], []).append(e)
+
+        for etype in ("completion", "carry_in", "created", "comment", "due"):
+            group = groups.get(etype)
+            if not group:
+                continue
+            cfg = _EVENT_CONFIG[etype]
+            event_label = cfg["label"]
+            if etype in ("completion", "carry_in"):
+                total_pts = sum(e["points"] for e in group)
+                event_label = f"{cfg['label']} ({int(total_pts)} pts)" if total_pts else cfg["label"]
+            header = _render_section_header(cfg["icon"], event_label, len(group), cfg["color"])
+            rows = [_render_task_row(e["name"], e.get("url"), e.get("status", ""),
+                                     e["assignee"], e["points"] if etype != "comment" else 0)
+                    for e in group]
+            st.markdown(header + "\n".join(rows), unsafe_allow_html=True)
+    else:
         st.caption("No task activity recorded for this day.")
-        return
 
-    # Group events by type for clean sections
-    groups: dict[str, list] = {}
-    for e in events:
-        groups.setdefault(e["type"], []).append(e)
+    # --- Remaining tasks grouped by status ---
+    if remaining_tasks:
+        spillover_label = "Potential Spillover" if is_last_day else "Still Remaining"
+        spillover_color = "#E57373" if is_last_day else "#6B7B8D"
+        spillover_icon = "\u26a0\ufe0f" if is_last_day else "\U0001f4cb"
 
-    # Render each group
-    for etype in ("completion", "carry_in", "created", "comment", "due"):
-        group = groups.get(etype)
-        if not group:
-            continue
+        # Group by status
+        by_status: dict[str, list] = {}
+        for t in remaining_tasks:
+            by_status.setdefault(t["status"], []).append(t)
 
-        cfg = _EVENT_CONFIG[etype]
-        rows_html = []
-        for e in group:
-            name_escaped = _html_mod.escape(e["name"])
-            link = f'<a href="{e["url"]}" target="_blank" style="color:#4A6FA5;text-decoration:none;font-weight:500">{name_escaped}</a>' if e.get("url") else name_escaped
+        status_order = ["In Progress", "Review", "QA", "To Do", "Backlog"]
+        ordered_statuses = [s for s in status_order if s in by_status]
+        ordered_statuses += [s for s in by_status if s not in status_order]
 
-            # Status badge
-            status = e.get("status", "")
-            status_color = _STATUS_COLORS.get(status, "#9E9E9E")
-            status_badge = ""
-            if status and etype != "comment":
-                status_badge = (
-                    f'<span style="display:inline-block;padding:1px 8px;border-radius:4px;'
-                    f'font-size:0.72rem;font-weight:600;color:#fff;background:{status_color}">'
-                    f'{_html_mod.escape(status)}</span>'
-                )
-
-            # Points
-            pts_html = ""
-            if e["points"] and etype in ("completion", "carry_in", "due", "created"):
-                pts_html = f'<span style="margin-left:auto;font-weight:600;color:#6B7B8D;font-size:0.82rem;white-space:nowrap">{int(e["points"])} pts</span>'
-
-            assignee_html = f'<span style="color:#6B7B8D;font-size:0.82rem;white-space:nowrap">{_html_mod.escape(e["assignee"])}</span>'
-
-            rows_html.append(
-                f'<div class="nm-activity-event">'
-                f'<span>{link}</span>&nbsp;{status_badge}&nbsp;{assignee_html}{pts_html}'
-                f'</div>'
-            )
-
-        # Section header
-        event_label = cfg["label"]
-        if etype in ("completion", "carry_in"):
-            total_pts = sum(e["points"] for e in group)
-            event_label = f"{cfg['label']} ({int(total_pts)} pts)" if total_pts else cfg["label"]
-        section_header = (
-            f'<div style="display:flex;align-items:center;gap:6px;margin:10px 0 4px 0;'
-            f'font-size:0.82rem;font-weight:600;color:{cfg["color"]}">'
-            f'{cfg["icon"]} {event_label} &mdash; {len(group)} task{"s" if len(group) != 1 else ""}</div>'
+        total_remaining_pts = sum(t["points"] for t in remaining_tasks)
+        section_title = (
+            f'<div style="display:flex;align-items:center;gap:6px;margin:14px 0 6px 0;'
+            f'font-size:0.88rem;font-weight:700;color:{spillover_color}">'
+            f'{spillover_icon} {spillover_label} &mdash; '
+            f'{n_remaining} tasks ({int(total_remaining_pts)} pts)</div>'
         )
+        st.markdown(section_title, unsafe_allow_html=True)
 
-        st.markdown(section_header + "\n".join(rows_html), unsafe_allow_html=True)
+        for status in ordered_statuses:
+            tasks_in_status = by_status[status]
+            status_color = _STATUS_COLORS.get(status, "#9E9E9E")
+            status_pts = sum(t["points"] for t in tasks_in_status)
+            sub_header = (
+                f'<div style="margin:6px 0 2px 4px;font-size:0.78rem;font-weight:600;color:{status_color}">'
+                f'{status} &mdash; {len(tasks_in_status)} ({int(status_pts)} pts)</div>'
+            )
+            rows = [_render_task_row(t["name"], t.get("url"), "", t["assignee"], t["points"])
+                    for t in tasks_in_status]
+            st.markdown(sub_header + "\n".join(rows), unsafe_allow_html=True)
 
 
 def render_sprint_activity(
@@ -3297,17 +3339,80 @@ def render_sprint_activity(
 
     activities = _build_sprint_activities(deduped, real_dates, completion_dates, carry_in_completion_dates)
 
+    # Build cumulative completed GIDs per day for "remaining" calculation.
+    # A task is "completed" once it appears in completion_dates or carry_in_completion_dates
+    # on or before a given day.
+    def _safe_pts(task):
+        try:
+            return float(task.story_points) if task.story_points else 0
+        except (ValueError, TypeError):
+            return 0
+
+    # All sprint tasks (the ones that count toward the burndown)
+    completed_statuses = ("Review", "QA", "Ready to Ship", "Done")
+    sprint_task_map = {}  # gid -> task info dict
+    for t in deduped:
+        sprint_task_map[t.gid] = {
+            "gid": t.gid, "name": t.name, "url": t.url,
+            "assignee": t.assignee or "Unassigned",
+            "points": _safe_pts(t), "status": t.progress or "",
+        }
+
+    # Build date -> set of GIDs completed on that date
+    completed_on_date: dict[str, set] = {}
+    for date_str, info in (completion_dates or {}).items():
+        for task in info.get("tasks", []):
+            completed_on_date.setdefault(date_str, set()).add(task.gid)
+    for date_str, info in (carry_in_completion_dates or {}).items():
+        for task in info.get("tasks", []):
+            completed_on_date.setdefault(date_str, set()).add(task.gid)
+
+    # Also mark tasks whose current status is completed but didn't appear in
+    # completion_dates (e.g. completed before the sprint started)
+    pre_completed_gids = set()
+    for t in deduped:
+        if t.progress in completed_statuses:
+            # Check if this task is NOT in any completion_dates
+            found = False
+            for gids in completed_on_date.values():
+                if t.gid in gids:
+                    found = True
+                    break
+            if not found:
+                pre_completed_gids.add(t.gid)
+
+    # Build cumulative completed set for each day
+    cumulative_completed: list[set] = []
+    running = set(pre_completed_gids)
+    for date_str in real_dates:
+        running = running | completed_on_date.get(date_str, set())
+        cumulative_completed.append(set(running))
+
     st.subheader("Sprint Activity")
     today_str = datetime.now().strftime("%Y-%m-%d")
+    is_last_day_idx = len(sprint_day_nums) - 1
 
     for idx, (day_num, date_str) in enumerate(zip(sprint_day_nums, real_dates)):
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         day_label = f"Day {day_num} ({_ordinal(dt.day)} {dt.strftime('%b')})"
         is_today = (date_str == today_str)
+        is_last_day = (idx == is_last_day_idx)
 
         events = activities.get(date_str, [])
         remaining = actual_line[idx] if idx < len(actual_line) else None
         ideal = ideal_line[idx] if idx < len(ideal_line) else None
+
+        # Remaining tasks = all sprint tasks not completed by end of this day
+        completed_by_now = cumulative_completed[idx] if idx < len(cumulative_completed) else set()
+        remaining_tasks = [
+            sprint_task_map[gid] for gid in sprint_task_map
+            if gid not in completed_by_now
+            and sprint_task_map[gid]["status"] not in completed_statuses
+        ]
+        remaining_tasks.sort(key=lambda t: (
+            ["In Progress", "Review", "QA", "To Do", "Backlog"].index(t["status"])
+            if t["status"] in ["In Progress", "Review", "QA", "To Do", "Backlog"] else 99
+        ))
 
         # Build summary for expander label
         parts = []
@@ -3317,16 +3422,16 @@ def render_sprint_activity(
         if comp_events:
             comp_pts = sum(e["points"] for e in comp_events)
             parts.append(f"{len(comp_events)} completed ({int(comp_pts)} pts)")
-        other = len(events) - len(comp_events)
-        if other:
-            parts.append(f"{other} other")
+        if remaining_tasks:
+            r_label = "spillover" if is_last_day else "left"
+            parts.append(f"{len(remaining_tasks)} {r_label}")
         summary = " | ".join(parts) if parts else "No activity"
 
         icon = "\U0001f539" if is_today else ""
         label = f"{icon} {day_label} \u2014 {summary}" if icon else f"{day_label} \u2014 {summary}"
 
         with st.expander(label, expanded=is_today):
-            _render_sprint_day_content(events, remaining, ideal)
+            _render_sprint_day_content(events, remaining, ideal, remaining_tasks, is_last_day)
 
 
 # =============================================================================
