@@ -667,6 +667,49 @@ st.markdown("""
         font-size: 0.9rem;
         color: var(--nm-text-secondary);
     }
+
+    /* Sprint Activity Timeline */
+    .nm-activity-event {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 14px;
+        margin-bottom: 6px;
+        border-radius: 10px;
+        background: var(--nm-bg);
+        box-shadow: 2px 2px 5px #A3B1C6, -2px -2px 5px #FFFFFF;
+        font-size: 0.88rem;
+        color: var(--nm-text-primary);
+    }
+    .nm-activity-event a {
+        color: var(--nm-primary);
+        text-decoration: none;
+        font-weight: 500;
+    }
+    .nm-activity-event a:hover { text-decoration: underline; }
+    .nm-activity-badge {
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+    .nm-activity-badge--completion { background: rgba(91,154,139,0.2); color: #3D7A6B; }
+    .nm-activity-badge--carry-in   { background: rgba(168,130,90,0.2); color: #8B6A3C; }
+    .nm-activity-badge--created    { background: rgba(107,127,215,0.2); color: #4A5FA0; }
+    .nm-activity-badge--comment    { background: rgba(90,154,168,0.2); color: #3D7A8A; }
+    .nm-activity-badge--due        { background: rgba(212,165,116,0.2); color: #8B6A3C; }
+    .nm-activity-pts {
+        margin-left: auto;
+        font-weight: 600;
+        color: var(--nm-text-secondary);
+        font-size: 0.82rem;
+    }
+    .nm-activity-assignee {
+        color: var(--nm-text-secondary);
+        font-size: 0.82rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1177,6 +1220,15 @@ def classify_sprint_task(task: TaskCompliance, sprint: str) -> str:
     return "current_only"
 
 
+def _ordinal(n):
+    """Return ordinal string for an integer (1 -> '1st', 2 -> '2nd', etc.)."""
+    if 11 <= (n % 100) <= 13:
+        suffix = 'th'
+    else:
+        suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
+    return f"{n}{suffix}"
+
+
 def render_burndown_chart(
     results: list[TaskCompliance],
     completed_results: Optional[list[TaskCompliance]] = None,
@@ -1426,13 +1478,6 @@ def render_burndown_chart(
     actual_line = []
     hover_texts = []
     tick_labels = []
-
-    def _ordinal(n):
-        if 11 <= (n % 100) <= 13:
-            suffix = 'th'
-        else:
-            suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
-        return f"{n}{suffix}"
 
     ideal_total = target_sprint_points if target_sprint_points else total_points
     daily_decrement = ideal_total / sprint_days
@@ -2045,7 +2090,7 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
 
     completed_headers = ["Task Name", "Assignee", "Story Points", "Current Status", "Status Changed Date",
                          "Type", "Epic", "Sprint Tag", "Asana Link"]
-
+    completed_fill = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
 
     ws_overview.cell(
         row=ov_row, column=1,
@@ -3013,6 +3058,238 @@ def render_bug_count_chart(
     )
 
     st.plotly_chart(fig, use_container_width=True, key="bugs_by_assignee")
+
+
+# =============================================================================
+# Sprint Activity Timeline
+# =============================================================================
+
+def _build_sprint_activities(
+    all_tasks: list,
+    sprint_dates: list[str],
+    completion_dates: dict,
+    carry_in_completion_dates: dict,
+) -> dict:
+    """Build a dict of date_str -> list of activity events from existing task data."""
+    if not sprint_dates:
+        return {}
+
+    sprint_start_str = sprint_dates[0]
+    sprint_end_str = sprint_dates[-1]
+    sprint_date_set = set(sprint_dates)
+    activities: dict[str, list] = {}
+    seen: set[tuple] = set()  # (gid, event_type, date) to deduplicate
+
+    def _snap_to_working_day(date_str):
+        """Roll a weekend date to the next Monday within the sprint."""
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        while dt.weekday() >= 5:
+            dt += timedelta(days=1)
+        snapped = dt.strftime("%Y-%m-%d")
+        # Only return if it falls within the sprint window
+        if snapped in sprint_date_set:
+            return snapped
+        return None
+
+    def _add_event(date_str, event):
+        key = (event["gid"], event["type"], date_str)
+        if key in seen:
+            return
+        seen.add(key)
+        activities.setdefault(date_str, []).append(event)
+
+    def _safe_pts(task):
+        try:
+            return float(task.story_points) if task.story_points else 0
+        except (ValueError, TypeError):
+            return 0
+
+    # 1. Completions from burndown data (already grouped by date)
+    for date_str, info in (completion_dates or {}).items():
+        for task in info.get("tasks", []):
+            _add_event(date_str, {
+                "type": "completion",
+                "gid": task.gid,
+                "name": task.name,
+                "url": task.url,
+                "assignee": task.assignee or "Unassigned",
+                "points": _safe_pts(task),
+                "badge_class": "completion",
+                "badge_label": "Completed",
+                "icon": "\u2705",
+            })
+
+    # 2. Carry-in completions
+    for date_str, info in (carry_in_completion_dates or {}).items():
+        for task in info.get("tasks", []):
+            _add_event(date_str, {
+                "type": "carry_in",
+                "gid": task.gid,
+                "name": task.name,
+                "url": task.url,
+                "assignee": task.assignee or "Unassigned",
+                "points": _safe_pts(task),
+                "badge_class": "carry-in",
+                "badge_label": "Carry-in",
+                "icon": "\U0001f4e5",
+            })
+
+    # 3. Scan all tasks for created, comment, and due events
+    for task in all_tasks:
+        # Task created during sprint
+        if task.created_at:
+            created_date = task.created_at[:10]
+            if sprint_start_str <= created_date <= sprint_end_str:
+                snap = _snap_to_working_day(created_date)
+                if snap:
+                    _add_event(snap, {
+                        "type": "created",
+                        "gid": task.gid,
+                        "name": task.name,
+                        "url": task.url,
+                        "assignee": task.assignee or "Unassigned",
+                        "points": _safe_pts(task),
+                        "badge_class": "created",
+                        "badge_label": "Created",
+                        "icon": "\u2795",
+                    })
+
+        # Comment during sprint (last_comment_date only — one per task)
+        if task.last_comment_date:
+            comment_date = task.last_comment_date[:10]
+            if sprint_start_str <= comment_date <= sprint_end_str:
+                snap = _snap_to_working_day(comment_date)
+                if snap:
+                    author = task.last_comment_author or ""
+                    _add_event(snap, {
+                        "type": "comment",
+                        "gid": task.gid,
+                        "name": task.name,
+                        "url": task.url,
+                        "assignee": author if author else (task.assignee or "Unassigned"),
+                        "points": 0,
+                        "badge_class": "comment",
+                        "badge_label": "Comment",
+                        "icon": "\U0001f4ac",
+                    })
+
+        # Due date falls in sprint
+        if task.due_on:
+            if sprint_start_str <= task.due_on <= sprint_end_str:
+                snap = _snap_to_working_day(task.due_on)
+                if snap:
+                    _add_event(snap, {
+                        "type": "due",
+                        "gid": task.gid,
+                        "name": task.name,
+                        "url": task.url,
+                        "assignee": task.assignee or "Unassigned",
+                        "points": _safe_pts(task),
+                        "badge_class": "due",
+                        "badge_label": "Due",
+                        "icon": "\U0001f4c5",
+                    })
+
+    # Sort events within each day: completions first, then carry-in, created, comment, due
+    type_order = {"completion": 0, "carry_in": 1, "created": 2, "comment": 3, "due": 4}
+    for date_str in activities:
+        activities[date_str].sort(key=lambda e: type_order.get(e["type"], 99))
+
+    return activities
+
+
+def _build_day_summary(events: list) -> str:
+    """Return a compact one-line summary of a day's events."""
+    if not events:
+        return "No activity"
+    counts: dict[str, int] = {}
+    total_pts = 0
+    for e in events:
+        counts[e["type"]] = counts.get(e["type"], 0) + 1
+        if e["type"] in ("completion", "carry_in"):
+            total_pts += e["points"]
+
+    parts = []
+    comp = counts.get("completion", 0) + counts.get("carry_in", 0)
+    if comp:
+        pts_str = f" ({int(total_pts)} pts)" if total_pts else ""
+        parts.append(f"{comp} completed{pts_str}")
+    if counts.get("created"):
+        parts.append(f"{counts['created']} created")
+    if counts.get("comment"):
+        parts.append(f"{counts['comment']} comments")
+    if counts.get("due"):
+        parts.append(f"{counts['due']} due")
+    return ", ".join(parts) if parts else "No activity"
+
+
+def _render_day_events(events: list):
+    """Render activity events as styled HTML rows inside a Streamlit expander."""
+    for e in events:
+        pts_html = ""
+        if e["points"] and e["type"] in ("completion", "carry_in", "due", "created"):
+            pts_html = f'<span class="nm-activity-pts">{int(e["points"])} pts</span>'
+
+        link = f'<a href="{e["url"]}" target="_blank">{e["name"]}</a>' if e.get("url") else e["name"]
+
+        html = f"""<div class="nm-activity-event">
+            <span>{e["icon"]}</span>
+            <span class="nm-activity-badge nm-activity-badge--{e["badge_class"]}">{e["badge_label"]}</span>
+            <span>{link}</span>
+            <span class="nm-activity-assignee">{e["assignee"]}</span>
+            {pts_html}
+        </div>"""
+        st.markdown(html, unsafe_allow_html=True)
+
+
+def render_sprint_activity(
+    results: list,
+    completed_results: Optional[list] = None,
+    selected_sprint: Optional[str] = None,
+    burndown_data: Optional[dict] = None,
+):
+    """Render a day-by-day sprint activity timeline."""
+    if not burndown_data:
+        return
+
+    sprint_day_nums = burndown_data.get("sprint_day_nums", [])
+    real_dates = burndown_data.get("real_dates", [])
+    completion_dates = burndown_data.get("completion_dates", {})
+    carry_in_completion_dates = burndown_data.get("carry_in_completion_dates", {})
+
+    if not sprint_day_nums or not real_dates:
+        return
+
+    # Combine and deduplicate tasks
+    all_tasks = list(results or []) + list(completed_results or [])
+    seen_gids: set[str] = set()
+    deduped: list = []
+    for t in all_tasks:
+        if t.gid not in seen_gids:
+            seen_gids.add(t.gid)
+            deduped.append(t)
+
+    activities = _build_sprint_activities(deduped, real_dates, completion_dates, carry_in_completion_dates)
+
+    st.subheader("Sprint Activity")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    for day_num, date_str in zip(sprint_day_nums, real_dates):
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        day_label = f"Day {day_num} ({_ordinal(dt.day)} {dt.strftime('%b')})"
+
+        events = activities.get(date_str, [])
+        summary = _build_day_summary(events)
+        is_today = (date_str == today_str)
+
+        icon = "\U0001f539" if is_today else ""
+        label = f"{icon} {day_label} \u2014 {summary}" if icon else f"{day_label} \u2014 {summary}"
+
+        with st.expander(label, expanded=is_today):
+            if not events:
+                st.caption("No activity recorded for this day.")
+            else:
+                _render_day_events(events)
 
 
 # =============================================================================
@@ -4212,6 +4489,11 @@ def main():
 
     # Bug Count by Assignee Chart
     render_bug_count_chart(filtered_results, filtered_completed, filters.get("sprint"))
+
+    st.markdown("---")
+
+    # Sprint Activity Timeline
+    render_sprint_activity(filtered_results, filtered_completed, filters.get("sprint"), burndown_data)
 
     st.markdown("---")
 
