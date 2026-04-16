@@ -1312,11 +1312,31 @@ def render_burndown_chart(
     # Determine sprint boundaries (2-week sprints, 10 working days)
     today = datetime.now()
 
-    # Use anchor date to compute current sprint start (2-week cadence)
+    # Use anchor date to compute sprint start (2-week cadence).
+    # For a specific sprint selection, determine the date window from task
+    # data so that previous sprints render their own date range rather than
+    # always showing the current sprint window.
     anchor_str = os.environ.get("SPRINT_ANCHOR_DATE", "2026-02-03")
     try:
         anchor = datetime.strptime(anchor_str, "%Y-%m-%d")
-        days_since_anchor = (today - anchor).days
+
+        # Determine the reference date for computing which sprint window to show
+        reference_date = today
+        if selected_sprint:
+            task_dates = []
+            for t in list(sprint_tasks) + list(completed_sprint_tasks):
+                for date_field in (t.due_on, getattr(t, 'completed_at', None)):
+                    if date_field:
+                        try:
+                            task_dates.append(datetime.strptime(date_field[:10], "%Y-%m-%d"))
+                        except (ValueError, TypeError):
+                            pass
+            if task_dates:
+                # Use the median task date to locate the correct sprint window
+                task_dates.sort()
+                reference_date = task_dates[len(task_dates) // 2]
+
+        days_since_anchor = (reference_date - anchor).days
         # On the exact 14-day boundary, today is the last day of the ending
         # sprint, not Day 1 of the next one.
         current_sprint_offset = (max(0, days_since_anchor - 1) // 14) * 14
@@ -1340,6 +1360,7 @@ def render_burndown_chart(
 
     sprint_days = len(sprint_working_dates)  # 10
     sprint_end = sprint_working_dates[-1]
+    is_past_sprint = sprint_end < today
 
     # Also accumulate any weekend completions into the next working day
     # so points completed on Sat/Sun aren't lost from the chart
@@ -1436,8 +1457,8 @@ def render_burndown_chart(
         if date_str in completion_dates:
             remaining -= completion_dates[date_str]["points"]
 
-        # Only show actual line up to today
-        if working_date <= today:
+        # Show actual line up to today for current sprint, or all days for past sprints
+        if is_past_sprint or working_date <= today:
             actual_val = max(0, remaining)
             actual_line.append(round(actual_val))
             # Build hover text with developer breakdown
