@@ -8,6 +8,7 @@ Run locally:
 """
 from __future__ import annotations
 
+import hmac
 import io
 import os
 import re
@@ -715,7 +716,7 @@ def check_passcode(entered_passcode: str) -> bool:
     if not correct_passcode:
         # No passcode configured - allow access
         return True
-    return entered_passcode == correct_passcode
+    return hmac.compare_digest(entered_passcode, correct_passcode)
 
 
 def render_login_screen():
@@ -1353,17 +1354,10 @@ def render_burndown_chart(
 
     sprint_days = len(sprint_working_dates)  # 10
     sprint_end = sprint_working_dates[-1]
-    is_past_sprint = sprint_end < today
+    is_past_sprint = sprint_end.date() < today.date()
 
-    # Also accumulate any weekend completions into the next working day
+    # Roll weekend completions into the next working day
     # so points completed on Sat/Sun aren't lost from the chart
-    all_calendar_dates = []
-    d = sprint_start
-    while d <= sprint_end:
-        all_calendar_dates.append(d)
-        d += timedelta(days=1)
-
-    # Map each calendar date to its nearest working day (for weekend rollup)
     def _next_working_day(dt):
         while dt.weekday() >= 5:
             dt += timedelta(days=1)
@@ -2368,7 +2362,7 @@ def generate_burndown_excel_report(burndown_data: dict, asana_client, all_sprint
                 comments_text = "\n".join(comment_lines)
                 pr_links = _extract_pr_links(task_obj.notes, task_comments)
         except Exception as e:
-            print(f"Warning: Could not fetch comments for task {task_obj.gid}: {e}")
+            pass  # Comments are optional; skip silently on API errors
 
         pts = float(task_obj.story_points) if task_obj.story_points else 0
 
@@ -3334,23 +3328,17 @@ def render_invalid_story_points_section(
     selected_assignees = filters.get("assignees")
     selected_statuses = filters.get("statuses")
 
-    # DEBUG: Show what filters are being applied
-    st.caption(f"DEBUG - Filters: sprint={selected_sprint}, assignees={selected_assignees}, statuses={selected_statuses}")
-
     # results is already filtered, just use it directly
     filtered_active_tasks = results
 
     # Apply all filters to completed_results
     filtered_completed_tasks = completed_results or []
-    before_filter_count = len(filtered_completed_tasks)
     if selected_sprint and selected_sprint != "All":
         filtered_completed_tasks = [t for t in filtered_completed_tasks if task_in_sprint(t, selected_sprint)]
     if selected_assignees and len(selected_assignees) > 0:
         filtered_completed_tasks = [t for t in filtered_completed_tasks if t.assignee in selected_assignees]
     if selected_statuses and len(selected_statuses) > 0:
         filtered_completed_tasks = [t for t in filtered_completed_tasks if t.progress in selected_statuses]
-
-    st.caption(f"DEBUG - Completed tasks: {before_filter_count} -> {len(filtered_completed_tasks)} after filter")
 
     # Combine all tasks and find invalid ones
     all_tasks = filtered_active_tasks + filtered_completed_tasks
@@ -4088,6 +4076,16 @@ def main():
         assignees=filters.get("assignees"),
         statuses=filters.get("statuses"),
     )
+    # Apply the same assignee/status filters to completed_results so all
+    # components (burndown, progress bar, charts, downloads) stay consistent.
+    filtered_completed = completed_results or []
+    if filters.get("sprint"):
+        filtered_completed = [t for t in filtered_completed if task_in_sprint(t, filters["sprint"])]
+    if filters.get("assignees"):
+        filtered_completed = [t for t in filtered_completed if t.assignee in filters["assignees"]]
+    if filters.get("statuses"):
+        filtered_completed = [t for t in filtered_completed if t.progress in filters["statuses"]]
+
     filtered_summary = reporter.analyzer.generate_summary(filtered_results)
     metrics = reporter.analyzer.calculate_sprint_metrics(filtered_results)
 
@@ -4102,7 +4100,7 @@ def main():
     st.markdown("---")
 
     # Sprint Progress Bar (Quick Wins)
-    render_sprint_progress_bar(filtered_results, completed_results, filters.get("sprint"))
+    render_sprint_progress_bar(filtered_results, filtered_completed, filters.get("sprint"))
 
     # Charts row: Burndown and Points by Assignee side by side
     col_burndown, col_assignee = st.columns([3, 2])
@@ -4118,14 +4116,14 @@ def main():
         )
         # Burndown chart
         burndown_data = render_burndown_chart(
-            filtered_results, completed_results, filters.get("sprint"),
+            filtered_results, filtered_completed, filters.get("sprint"),
             target_sprint_points=target_sprint_points if target_sprint_points > 0 else None,
             all_results=results,
         )
 
     with col_assignee:
         # Points by Assignee Chart (Quick Wins)
-        render_points_by_assignee_chart(filtered_results, completed_results, filters.get("sprint"))
+        render_points_by_assignee_chart(filtered_results, filtered_completed, filters.get("sprint"))
 
     # Burndown summary table — full page width (outside column layout)
     if burndown_data:
@@ -4201,7 +4199,7 @@ def main():
         with col_dl2:
             today_date = datetime.now().strftime("%Y-%m-%d")
             sprint_slug = bd['sprint'].replace(' ', '_')
-            all_sprint_tasks = list(filtered_results) + list(completed_results or [])
+            all_sprint_tasks = list(filtered_results) + list(filtered_completed)
             excel_bytes = generate_burndown_excel_report(bd, reporter.client, all_sprint_tasks=all_sprint_tasks)
             st.download_button(
                 label="Download Burndown Data",
@@ -4211,7 +4209,7 @@ def main():
             )
 
     # Bug Count by Assignee Chart
-    render_bug_count_chart(filtered_results, completed_results, filters.get("sprint"))
+    render_bug_count_chart(filtered_results, filtered_completed, filters.get("sprint"))
 
     st.markdown("---")
 
@@ -4220,15 +4218,15 @@ def main():
     col_team, col_individual = st.columns(2)
 
     with col_team:
-        team_data = render_team_completion_chart(completed_results, filters, filters.get("sprint"))
+        team_data = render_team_completion_chart(filtered_completed, filters, filters.get("sprint"))
 
     with col_individual:
-        render_individual_completion_chart(completed_results, filters, filters.get("sprint"), team_data)
+        render_individual_completion_chart(filtered_completed, filters, filters.get("sprint"), team_data)
 
     st.markdown("---")
 
     # Invalid Story Points Alert (Quick Wins) - Shows both active and completed tasks
-    render_invalid_story_points_section(filtered_results, completed_results, filters)
+    render_invalid_story_points_section(filtered_results, filtered_completed, filters)
 
     # Overdue Tasks Alert (Quick Wins) - Most critical first
     render_overdue_alert_section(filtered_results)
@@ -4255,7 +4253,7 @@ def main():
     st.markdown("---")
 
     # Download buttons
-    render_download_buttons(filtered_results, filtered_summary, config, completed_results, filters)
+    render_download_buttons(filtered_results, filtered_summary, config, filtered_completed, filters)
 
 
 if __name__ == "__main__":
